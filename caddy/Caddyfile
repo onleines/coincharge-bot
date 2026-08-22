@@ -1,0 +1,27 @@
+bot.coincharge.io {
+  encode zstd gzip
+
+  log {
+    output stdout
+    format console
+  }
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "strict-origin-when-cross-origin"
+  }
+
+  handle /health* {
+    reverse_proxy broker:3000
+  }
+
+  handle /chat* {
+    reverse_proxy broker:3000
+  }
+
+  handle {
+    respond "OK" 200
+  }
+}

@@ -1,0 +1,78 @@
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - broker
+
+  broker:
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./broker:/app
+    environment:
+      - OPENCLAW_URL=http://openclaw:18789/v1/chat/completions
+      - OPENCLAW_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+      - EMBED_MODEL=text-embedding-3-small
+
+      # ---- Speed / "B" tuning ----
+      - MAX_CONTEXT_CHARS=9000
+      - TOP_K=8
+      - PER_COLLECTION_LIMIT=5
+      - MAX_QUERY_VARIANTS=1
+      - OPENCLAW_TIMEOUT_S=30
+      - HTTP_CONNECT_TIMEOUT_S=5
+      - EMBED_CACHE_SIZE=512
+      - EMBED_CACHE_TTL_S=900
+
+    command: bash -lc "python -m pip install --no-cache-dir -r requirements.txt && uvicorn app:app --host 0.0.0.0 --port 3000"
+    depends_on:
+      - openclaw
+      - qdrant
+
+  ingest:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./kb:/app
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+      - SITE=${SITE:-coincharge.io}
+      - COLLECTION=${COLLECTION:-kb_coincharge_v2}
+      - SITEMAP_INDEX=${SITEMAP_INDEX:-https://coincharge.io/sitemap_index.xml}
+      - EMBED_MODEL=text-embedding-3-small
+    command: bash -lc "python -m pip install --no-cache-dir -r requirements.txt && python ingest.py"
+    depends_on:
+      - qdrant
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    restart: unless-stopped
+    environment:
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./openclaw:/home/node/.openclaw
+    expose:
+      - "18789"
+
+volumes:
+  caddy_data:
+  caddy_config:

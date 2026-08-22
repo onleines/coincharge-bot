@@ -1,0 +1,54 @@
+# Secrets / local environment
+.env
+.env.*
+*.pem
+*.key
+*secret*
+*credential*
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Logs
+*.log
+kb/reports/
+
+# Runtime / persistent application state
+qdrant_data/
+kb/state/
+openclaw/
+
+# Local/generated broker data
+broker/data/
+
+# Editor / OS files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Local backups created during development
+*.bak
+*.bak-*
+*.backup-*
+*.backup.*
+app.py.bak-*
+app.py.backup-*
+regression_test.py.bak-*
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Saved copies
+*.save
+
+# Legacy root ingest script; active ingest lives in kb/
+/ingest.py
+
+# Per-site secrets
+kb/sites/*/.env
+kb/sites/*/.env.*
