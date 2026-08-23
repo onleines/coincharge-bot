@@ -243,6 +243,394 @@ TESTS = [
     ),
 
     TestCase(
+        name="Scope Matrix Bringin Minimum",
+        message=(
+            "Wie hoch ist der Mindestbetrag für eine Zahlung "
+            "über Bringin?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "11,000",
+                "11.000",
+            ],
+            [
+                "sat",
+                "sats",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap wallet beträgt",
+            "coinsnap wallet gilt",
+        ],
+        required_meta_true=[
+            "scope_structured_used",
+            "repair_attempted",
+            "repair_success",
+            "scope_repair_success",
+        ],
+        required_meta_false=[
+            "scope_audit_attempted",
+        ],
+        required_meta_none=[
+            "scope_fact_extraction_error",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Scope Matrix Bringin Maximum Payment",
+        message=(
+            "Wie hoch ist der Maximalbetrag pro Zahlung "
+            "bei Bringin?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "3.000",
+                "3,000",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap wallet beträgt",
+            "coinsnap wallet gilt",
+        ],
+        required_meta_true=[
+            "scope_structured_used",
+            "repair_attempted",
+            "repair_success",
+            "scope_repair_success",
+        ],
+        required_meta_false=[
+            "scope_audit_attempted",
+        ],
+        required_meta_none=[
+            "scope_fact_extraction_error",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Scope Matrix Bringin Conversion Fee",
+        message=(
+            "Welche Conversion-Gebühr gilt bei Bringin "
+            "für die Umwandlung in Euro?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "1 %",
+                "1%",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap wallet beträgt",
+            "coinsnap wallet gilt",
+        ],
+        required_meta_true=[
+            "scope_structured_used",
+            "repair_attempted",
+            "repair_success",
+            "scope_repair_success",
+        ],
+        required_meta_false=[
+            "scope_audit_attempted",
+        ],
+        required_meta_none=[
+            "scope_fact_extraction_error",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Scope Matrix Bringin Bank Payout Fee",
+        message=(
+            "Welche Gebühr verlangt Bringin für die Auszahlung "
+            "auf mein Bankkonto?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "1 %",
+                "1%",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap wallet beträgt",
+            "coinsnap wallet gilt",
+        ],
+        required_meta_true=[
+            "scope_structured_used",
+            "repair_attempted",
+            "repair_success",
+            "scope_repair_success",
+        ],
+        required_meta_false=[
+            "scope_audit_attempted",
+        ],
+        required_meta_none=[
+            "scope_fact_extraction_error",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Scope Matrix Bringin KYC Documents",
+        message=(
+            "Welche KYC-Anforderungen gelten für ein "
+            "Bringin-Konto?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+            "kyc",
+        ],
+        required_reply_any_groups=[
+            [
+                "ausweis",
+                "id",
+                "ident",
+            ],
+        ],
+        required_meta_true=[
+            "scope_structured_used",
+            "repair_attempted",
+            "repair_success",
+            "scope_repair_success",
+        ],
+        required_meta_false=[
+            "scope_audit_attempted",
+        ],
+        required_meta_none=[
+            "scope_fact_extraction_error",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Scope Matrix Bringin Payout Account",
+        message=(
+            "Welche Anforderung gilt bei Bringin für das "
+            "Bankkonto, auf das ausgezahlt wird?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "name",
+                "kontoinhaber",
+                "inhaber",
+            ],
+        ],
+        required_meta_true=[
+            "scope_structured_used",
+            "repair_attempted",
+            "repair_success",
+            "scope_repair_success",
+        ],
+        required_meta_false=[
+            "scope_audit_attempted",
+        ],
+        required_meta_none=[
+            "scope_fact_extraction_error",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Scope Matrix Bringin SEPA Payout",
+        message=(
+            "Wie erfolgt die Auszahlung bei Bringin nach "
+            "der Bestätigung?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+            "sepa",
+        ],
+        required_reply_any_groups=[
+            [
+                "instant",
+                "sofort",
+            ],
+        ],
+        required_source_terms=[
+            "coinsnap.io",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Scope Matrix Wallet vs Bringin KYC",
+        message=(
+            "Welche KYC-Anforderung gilt für die Coinsnap Wallet, "
+            "und welche gilt bei Bringin?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "coinsnap wallet",
+            "bringin",
+            "kyc",
+        ],
+        forbidden_reply_terms=[
+            "coinsnap wallet benötigt einen gültigen ausweis",
+            "coinsnap wallet benötigt einen ausweis",
+            "coinsnap wallet kyc bei bringin",
+        ],
+        required_meta_true=[
+            "scope_structured_used",
+            "repair_attempted",
+            "repair_success",
+            "scope_repair_success",
+        ],
+        required_meta_false=[
+            "scope_audit_attempted",
+        ],
+        required_meta_none=[
+            "scope_fact_extraction_error",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Scope Matrix Wallet vs Bringin Payout Fee",
+        message=(
+            "Gilt die 1-Prozent-Bankauszahlungsgebühr von Bringin "
+            "auch für die Coinsnap Wallet?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "coinsnap wallet",
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "1 %",
+                "1%",
+                "1-prozent",
+                "1 prozent",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap wallet beträgt 1",
+            "bei der coinsnap wallet gilt eine gebühr von 1",
+        ],
+        required_meta_true=[
+            "scope_structured_used",
+            "repair_attempted",
+            "repair_success",
+            "scope_repair_success",
+        ],
+        required_meta_false=[
+            "scope_audit_attempted",
+        ],
+        required_meta_none=[
+            "scope_fact_extraction_error",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Scope Matrix DFX vs Bringin Limit",
+        message=(
+            "Hat DFX dasselbe monatliche Auszahlungslimit von "
+            "10.000 Euro wie Bringin?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "dfx",
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "10.000",
+                "10,000",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "dfx hat ein monatliches auszahlungslimit von 10",
+            "bei dfx gilt ein monatliches auszahlungslimit von 10",
+        ],
+        required_meta_true=[
+            "scope_structured_used",
+            "repair_attempted",
+            "repair_success",
+            "scope_repair_success",
+        ],
+        required_meta_false=[
+            "scope_audit_attempted",
+        ],
+        required_meta_none=[
+            "scope_fact_extraction_error",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
         name="Scope Direct Bringin",
         message=(
             "Wie hoch ist das monatliche Auszahlungslimit bei "

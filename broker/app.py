@@ -4832,11 +4832,12 @@ def _needs_structured_scope_path(
     message: str,
 ) -> bool:
     """
-    Activate deterministic scope extraction only when the USER
-    explicitly asks about a scope-sensitive condition.
+    Activate deterministic scope extraction when the user's
+    question concerns a scope-sensitive condition.
 
-    Do not activate merely because the generated answer happens
-    to contain a price, percentage, fee or other numeric fact.
+    Pure process/how-to questions should stay on the normal
+    answer path unless they also contain an explicit condition
+    such as a fee, limit, KYC rule or restriction.
     """
 
     q = (
@@ -4844,28 +4845,30 @@ def _needs_structured_scope_path(
         or ""
     ).casefold()
 
-    patterns = [
-        # Limits / bounds
-        r"\blimit",
-        r"\blimits",
-        r"\bminimum\b",
-        r"\bmaximum\b",
-        r"\bmindest",
-        r"\bmaximal",
-        r"\bhöchst",
-        r"\bhoechst",
+    # -----------------------------------------------------
+    # Strong condition signals
+    # -----------------------------------------------------
+    #
+    # These deliberately include substring matches for German
+    # compounds such as:
+    #
+    #   Bankauszahlungsgebühr
+    #   Transaktionsgebühr
+    #   Auszahlungslimit
+    #   Mindestbetrag
+    #
 
-        # Payout / withdrawal
-        r"\bauszahl",
-        r"\babheb",
-        r"\bpayout",
-        r"\bwithdraw",
+    strong_patterns = [
+        r"limit",
+        r"minimum",
+        r"maximum",
+        r"mindest",
+        r"maximal",
+        r"höchst",
+        r"hoechst",
 
-        # Fees / pricing
-        r"\bgebühr",
-        r"\bgebuehr",
-        r"\bgebühren",
-        r"\bgebuehren",
+        r"gebühr",
+        r"gebuehr",
         r"\bfee\b",
         r"\bfees\b",
         r"\bkosten\b",
@@ -4873,16 +4876,76 @@ def _needs_structured_scope_path(
         r"\bprice\b",
         r"\bcost\b",
 
-        # KYC / contractual conditions
         r"\bkyc\b",
-        r"\banforderung",
-        r"\brequirement",
-        r"\brestriction",
-        r"\bbeschränk",
-        r"\bbeschraenk",
-        r"\bavailability\b",
-        r"\bverfügbar",
-        r"\bverfuegbar",
+        r"anforderung",
+        r"requirement",
+        r"restriction",
+        r"beschränk",
+        r"beschraenk",
+        r"verfügbar",
+        r"verfuegbar",
+        r"availability",
+    ]
+
+    strong_scope_signal = any(
+        re.search(
+            pattern,
+            q,
+            flags=re.IGNORECASE,
+        )
+        for pattern in strong_patterns
+    )
+
+    if strong_scope_signal:
+        return True
+
+    # -----------------------------------------------------
+    # Pure process questions
+    # -----------------------------------------------------
+    #
+    # "Wie erfolgt die Auszahlung?" asks for a procedure,
+    # not for ownership of a limit/fee/rule. Keep it on the
+    # normal grounded-answer path.
+    #
+
+    procedural_patterns = [
+        r"\bwie erfolgt\b",
+        r"\bwie funktioniert\b",
+        r"\bwie läuft\b",
+        r"\bwie laeuft\b",
+        r"\bablauf\b",
+        r"\bprozess\b",
+        r"\bprocess\b",
+        r"\bnach der bestätigung\b",
+        r"\bnach der bestaetigung\b",
+        r"\bafter confirmation\b",
+    ]
+
+    procedural_query = any(
+        re.search(
+            pattern,
+            q,
+            flags=re.IGNORECASE,
+        )
+        for pattern in procedural_patterns
+    )
+
+    if procedural_query:
+        return False
+
+    # -----------------------------------------------------
+    # General payout / withdrawal scope
+    # -----------------------------------------------------
+    #
+    # These remain useful scope signals for questions such as
+    # "Welche Rolle hat DFX bei der Auszahlung ...?".
+    #
+
+    payout_patterns = [
+        r"auszahl",
+        r"abheb",
+        r"\bpayout",
+        r"\bwithdraw",
     ]
 
     return any(
@@ -4891,8 +4954,9 @@ def _needs_structured_scope_path(
             q,
             flags=re.IGNORECASE,
         )
-        for pattern in patterns
+        for pattern in payout_patterns
     )
+
 
 
 def _needs_scope_audit(
