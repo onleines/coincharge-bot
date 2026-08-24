@@ -2852,6 +2852,194 @@ def _format_grouped_context_blocks(
 # Retrieval
 # -----------------------------------------------------------------------------
 
+
+def _build_scope_retrieval_query(
+    message: str,
+) -> str:
+    """
+    Build one owner-neutral retrieval query for scope-sensitive
+    questions.
+
+    The purpose is recall: if the user incorrectly attributes a
+    fee, limit or condition to one entity, retrieval should still
+    be able to find documents where that fact belongs to another
+    entity.
+
+    No partner/company names are hard-coded here.
+    """
+
+    if not _needs_structured_scope_path(
+        message
+    ):
+        return ""
+
+    q = (
+        message
+        or ""
+    ).casefold()
+
+    parts: List[str] = []
+
+    def add(value: str) -> None:
+        value = (
+            value
+            or ""
+        ).strip()
+
+        if (
+            value
+            and value not in parts
+        ):
+            parts.append(value)
+
+    # Preserve important numeric anchors exactly enough for
+    # retrieval: percentages, currency-like values and amounts.
+    numeric_patterns = [
+        r"\b\d+(?:[.,]\d+)?\s*%",
+        r"[€$£]\s*\d+(?:[.,]\d+)?",
+        r"\b\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?\b",
+    ]
+
+    for pattern in numeric_patterns:
+        for match in re.findall(
+            pattern,
+            q,
+            flags=re.IGNORECASE,
+        ):
+            add(
+                str(match).strip()
+            )
+
+    # Fact-oriented vocabulary. German substring checks are
+    # intentional so compounds such as Bankauszahlungsgebühr,
+    # Auszahlungslimit and Mindestbetrag are recognized.
+    vocabulary = [
+        (
+            [
+                "gebühr",
+                "gebuehr",
+                "fee",
+                "kosten",
+                "preis",
+                "price",
+                "cost",
+            ],
+            [
+                "gebühr",
+                "fee",
+            ],
+        ),
+        (
+            [
+                "auszahl",
+                "abheb",
+                "payout",
+                "withdraw",
+            ],
+            [
+                "auszahlung",
+                "bankkonto",
+                "payout",
+                "withdrawal",
+            ],
+        ),
+        (
+            [
+                "bankkonto",
+                "bank account",
+            ],
+            [
+                "bankkonto",
+                "bank account",
+            ],
+        ),
+        (
+            [
+                "limit",
+                "mindest",
+                "minimum",
+                "maximal",
+                "maximum",
+                "höchst",
+                "hoechst",
+            ],
+            [
+                "limit",
+                "minimum",
+                "maximum",
+            ],
+        ),
+        (
+            [
+                "kyc",
+            ],
+            [
+                "kyc",
+                "documents",
+            ],
+        ),
+        (
+            [
+                "sepa",
+            ],
+            [
+                "sepa",
+                "instant",
+            ],
+        ),
+        (
+            [
+                "zahlung",
+                "payment",
+            ],
+            [
+                "zahlung",
+                "payment",
+            ],
+        ),
+    ]
+
+    for needles, expansions in vocabulary:
+        if any(
+            needle in q
+            for needle in needles
+        ):
+            for expansion in expansions:
+                add(expansion)
+
+    # A useful variant must contain more than just a number.
+    descriptive = [
+        value
+        for value in parts
+        if not re.fullmatch(
+            r"[\d\s.,€$£%]+",
+            value,
+        )
+    ]
+
+    if not descriptive:
+        return ""
+
+    variant = " ".join(
+        parts
+    ).strip()
+
+    original = (
+        message
+        or ""
+    ).strip()
+
+    if (
+        not variant
+        or variant.casefold()
+        == original.casefold()
+    ):
+        return ""
+
+    return variant
+
+
+
 def retrieve_context(
     query: str,
     site: str,
@@ -2869,6 +3057,24 @@ def retrieve_context(
     embedding = get_embedding(
         query
     )
+
+    scope_retrieval_query = (
+        _build_scope_retrieval_query(
+            query
+        )
+    )
+
+    scope_embedding = None
+
+    if scope_retrieval_query:
+        try:
+            scope_embedding = (
+                get_embedding(
+                    scope_retrieval_query
+                )
+            )
+        except Exception:
+            scope_embedding = None
 
     (
         collections,
@@ -2895,6 +3101,9 @@ def retrieve_context(
 
     vector_hits = []
     text_hits = []
+
+    scope_vector_hits = []
+    scope_text_hits = []
 
     for index, collection in enumerate(
         collections
@@ -2965,6 +3174,67 @@ def retrieve_context(
                 hit
             )
 
+        if scope_embedding is not None:
+
+            try:
+                scope_results = (
+                    qdrant.search(
+                        collection_name=collection,
+                        query_vector=scope_embedding,
+                        query_filter=geo_filter,
+                        limit=PER_COLLECTION_LIMIT,
+                        with_payload=True,
+                    )
+                )
+            except Exception:
+                scope_results = []
+
+            for result in scope_results:
+
+                hit = _as_hit(
+                    collection,
+                    "vector",
+                    result,
+                )
+
+                extra = 0.0
+
+                if collection == COL_COINCHARGE:
+                    extra = affinity[
+                        "coincharge"
+                    ]
+
+                elif collection == COL_COINSNAP:
+                    extra = affinity[
+                        "coinsnap"
+                    ]
+
+                elif collection == COL_COINPAGES:
+                    extra = affinity[
+                        "coinpages"
+                    ]
+
+                elif collection == COL_COINSNAP_DOCS:
+                    extra = affinity[
+                        "coinsnap_docs"
+                    ]
+
+                hit["score"] = (
+                    float(
+                        hit["score"]
+                    )
+                    + priority_boost
+                    + extra
+                )
+
+                hit[
+                    "scope_retrieval_variant"
+                ] = True
+
+                scope_vector_hits.append(
+                    hit
+                )
+
         if HYBRID_ENABLED:
 
             text_results = (
@@ -3012,6 +3282,57 @@ def retrieve_context(
                 text_results
             )
 
+            if scope_retrieval_query:
+
+                scope_text_results = (
+                    _text_scroll(
+                        collection,
+                        scope_retrieval_query,
+                        geo_filter,
+                    )
+                )
+
+                for hit in scope_text_results:
+
+                    extra = 0.0
+
+                    if collection == COL_COINCHARGE:
+                        extra = affinity[
+                            "coincharge"
+                        ]
+
+                    elif collection == COL_COINSNAP:
+                        extra = affinity[
+                            "coinsnap"
+                        ]
+
+                    elif collection == COL_COINPAGES:
+                        extra = affinity[
+                            "coinpages"
+                        ]
+
+                    elif collection == COL_COINSNAP_DOCS:
+                        extra = affinity[
+                            "coinsnap_docs"
+                        ]
+
+                    hit["score"] = (
+                        float(
+                            hit["score"]
+                        )
+                        + priority_boost
+                        * 0.5
+                        + extra
+                    )
+
+                    hit[
+                        "scope_retrieval_variant"
+                    ] = True
+
+                scope_text_hits.extend(
+                    scope_text_results
+                )
+
     vector_hits.sort(
         key=lambda hit: float(
             hit.get(
@@ -3032,24 +3353,76 @@ def retrieve_context(
         reverse=True,
     )
 
+    scope_vector_hits.sort(
+        key=lambda hit: float(
+            hit.get(
+                "score",
+                0.0,
+            )
+        ),
+        reverse=True,
+    )
+
+    scope_text_hits.sort(
+        key=lambda hit: float(
+            hit.get(
+                "score",
+                0.0,
+            )
+        ),
+        reverse=True,
+    )
+
     if (
         HYBRID_ENABLED
         and (
             vector_hits
             or text_hits
+            or scope_vector_hits
+            or scope_text_hits
         )
+    ):
+
+        ranking_lists = [
+            hits
+            for hits in [
+                vector_hits,
+                text_hits,
+                scope_vector_hits,
+                scope_text_hits,
+            ]
+            if hits
+        ]
+
+        ranked = _rrf_merge(
+            ranking_lists,
+            RRF_K,
+        )
+
+        retrieval_mode = (
+            "hybrid_scope"
+            if scope_retrieval_query
+            else "hybrid"
+        )
+
+    elif (
+        scope_vector_hits
     ):
 
         ranked = _rrf_merge(
             [
-                vector_hits,
-                text_hits,
+                hits
+                for hits in [
+                    vector_hits,
+                    scope_vector_hits,
+                ]
+                if hits
             ],
             RRF_K,
         )
 
         retrieval_mode = (
-            "hybrid"
+            "vector_scope"
         )
 
     else:
@@ -3212,6 +3585,18 @@ def retrieve_context(
         ),
         "retrieval_mode": (
             retrieval_mode
+        ),
+        "scope_retrieval_query": (
+            scope_retrieval_query
+        ),
+        "scope_retrieval_used": bool(
+            scope_retrieval_query
+        ),
+        "scope_vector_candidates": len(
+            scope_vector_hits
+        ),
+        "scope_text_candidates": len(
+            scope_text_hits
         ),
         "hybrid_enabled": (
             HYBRID_ENABLED
@@ -5278,6 +5663,53 @@ REQUESTED FACT RULES:
 
 - Preserve numeric values exactly as supported by CONTEXT.
 
+REQUESTED FACT CONDITION RULES:
+
+- If the requested fact has a directly stated condition,
+  qualifier, way to increase/change it, exception or restriction,
+  return it in "requested_fact_condition".
+
+- This includes conditions that answer another explicit part of
+  the user's same question.
+
+- Example:
+  value = "€10,000"
+  condition = "can be increased with additional KYC documents"
+
+- Do not discard a condition merely because the primary numeric
+  value has already been extracted.
+
+- Leave "requested_fact_condition" empty only when CONTEXT does
+  not directly state such a condition.
+
+REQUESTED FACT EVIDENCE RULES:
+
+- If "requested_fact_status" is "specified", you MUST return
+  "requested_fact_evidence".
+
+- "requested_fact_evidence" must be a short exact phrase or
+  sentence copied verbatim from the Excerpt body.
+
+- The evidence must directly support the requested fact value.
+
+- Also return "requested_fact_owner_evidence": a short exact
+  phrase or sentence copied verbatim from the SAME Excerpt body
+  that identifies the requested fact owner.
+
+- The requested fact owner must appear explicitly in
+  "requested_fact_owner_evidence".
+
+- "requested_fact_evidence" and
+  "requested_fact_owner_evidence" must come from the SAME
+  Excerpt.
+
+- Do not use Title, Section or Section-Path metadata as either
+  evidence field.
+
+- If you cannot provide exact evidence supporting both the
+  requested owner and the requested fact, use
+  "requested_fact_status": "not_specified".
+
 DASHBOARD / CONFIGURATION RULES:
 
 - If the user asks whether something can be changed in a
@@ -5295,7 +5727,10 @@ Return ONLY one JSON object with exactly this structure:
   "requested_fact": "",
   "requested_fact_status": "specified|not_specified|ambiguous",
   "requested_fact_value": "",
+  "requested_fact_condition": "",
   "requested_fact_owner": "",
+  "requested_fact_evidence": "",
+  "requested_fact_owner_evidence": "",
   "related_facts": [
     {{
       "owner": "",
@@ -5462,6 +5897,13 @@ Return only the required JSON object.
         related_facts.append(
             {
                 "owner": owner[:200],
+                "owner_evidence": str(
+                    item.get(
+                        "owner_evidence",
+                        "",
+                    )
+                    or ""
+                ).strip()[:1000],
                 "scope": str(
                     item.get("scope", "")
                     or ""
@@ -5500,6 +5942,13 @@ Return only the required JSON object.
             )
             or ""
         ).strip()[:500],
+        "requested_fact_condition": str(
+            parsed.get(
+                "requested_fact_condition",
+                "",
+            )
+            or ""
+        ).strip()[:500],
         "requested_fact_owner": str(
             parsed.get(
                 "requested_fact_owner",
@@ -5507,6 +5956,20 @@ Return only the required JSON object.
             )
             or ""
         ).strip()[:200],
+        "requested_fact_evidence": str(
+            parsed.get(
+                "requested_fact_evidence",
+                "",
+            )
+            or ""
+        ).strip()[:1000],
+        "requested_fact_owner_evidence": str(
+            parsed.get(
+                "requested_fact_owner_evidence",
+                "",
+            )
+            or ""
+        ).strip()[:1000],
         "related_facts": related_facts,
         "dashboard_or_configuration_status": (
             config_status
@@ -5661,6 +6124,540 @@ Return only the required JSON object.
             "requested_fact_owner"
         ] = ""
 
+    # -----------------------------------------------------
+    # Deterministic requested-fact evidence validation
+    # -----------------------------------------------------
+    #
+    # A model-labelled "specified" fact is accepted only when
+    # its exact evidence exists in CONTEXT and the evidence
+    # supports the semantic scope of the requested fact.
+    #
+    # This prevents, for example, a generic processing fee
+    # from being reused as a bank-withdrawal fee merely because
+    # both happen to have the same numeric value.
+    #
+
+    def normalize_evidence_text(
+        value: str,
+    ) -> str:
+        value = (
+            value
+            or ""
+        ).casefold()
+
+        value = value.replace(
+            "\xa0",
+            " ",
+        )
+
+        return re.sub(
+            r"\s+",
+            " ",
+            value,
+        ).strip()
+
+    def contains_any(
+        value: str,
+        needles: List[str],
+    ) -> bool:
+        return any(
+            needle in value
+            for needle in needles
+        )
+
+    def evidence_supports_fact_scope(
+        requested_fact_value: str,
+        evidence_value: str,
+    ) -> bool:
+
+        fact = normalize_evidence_text(
+            requested_fact_value
+        )
+
+        evidence = normalize_evidence_text(
+            evidence_value
+        )
+
+        if not fact or not evidence:
+            return False
+
+        concept_groups = [
+            (
+                [
+                    "auszahl",
+                    "withdraw",
+                    "payout",
+                    "abheb",
+                ],
+                [
+                    "auszahl",
+                    "withdraw",
+                    "payout",
+                    "abheb",
+                    "bankkonto",
+                    "bank account",
+                ],
+            ),
+            (
+                [
+                    "gebühr",
+                    "gebuehr",
+                    "fee",
+                ],
+                [
+                    "gebühr",
+                    "gebuehr",
+                    "fee",
+                    "%",
+                    "percent",
+                    "prozent",
+                ],
+            ),
+            (
+                [
+                    "kyc",
+                ],
+                [
+                    "kyc",
+                    "ident",
+                    "identity",
+                    "passport",
+                    "ausweis",
+                    "utility bill",
+                ],
+            ),
+            (
+                [
+                    "minimum",
+                    "mindest",
+                ],
+                [
+                    "minimum",
+                    "mindest",
+                    "at least",
+                    "mindestens",
+                ],
+            ),
+            (
+                [
+                    "maximum",
+                    "maximal",
+                    "höchst",
+                    "hoechst",
+                ],
+                [
+                    "maximum",
+                    "maximal",
+                    "höchst",
+                    "hoechst",
+                    "up to",
+                    "bis zu",
+                ],
+            ),
+            (
+                [
+                    "limit",
+                ],
+                [
+                    "limit",
+                    "up to",
+                    "bis zu",
+                    "maximum",
+                    "maximal",
+                ],
+            ),
+            (
+                [
+                    "täglich",
+                    "taeglich",
+                    "daily",
+                    "day",
+                ],
+                [
+                    "täglich",
+                    "taeglich",
+                    "daily",
+                    "per day",
+                    "pro tag",
+                ],
+            ),
+            (
+                [
+                    "monatlich",
+                    "monthly",
+                    "month",
+                    "monat",
+                ],
+                [
+                    "monatlich",
+                    "monthly",
+                    "per month",
+                    "pro monat",
+                    "month",
+                ],
+            ),
+            (
+                [
+                    "bankkonto",
+                    "bank account",
+                ],
+                [
+                    "bankkonto",
+                    "bank account",
+                    "bank",
+                    "iban",
+                ],
+            ),
+        ]
+
+        for requested_signals, evidence_signals in concept_groups:
+
+            if contains_any(
+                fact,
+                requested_signals,
+            ):
+                if not contains_any(
+                    evidence,
+                    evidence_signals,
+                ):
+                    return False
+
+        return True
+
+    if (
+        normalized.get(
+            "requested_fact_status"
+        )
+        == "specified"
+    ):
+
+        evidence = str(
+            normalized.get(
+                "requested_fact_evidence",
+                "",
+            )
+            or ""
+        ).strip()
+
+        evidence_normalized = (
+            normalize_evidence_text(
+                evidence
+            )
+        )
+
+        context_normalized = (
+            normalize_evidence_text(
+                context
+            )
+        )
+
+        evidence_exists = (
+            bool(evidence_normalized)
+            and evidence_normalized
+            in context_normalized
+        )
+
+        fact_scope_supported = (
+            evidence_supports_fact_scope(
+                str(
+                    normalized.get(
+                        "requested_fact",
+                        "",
+                    )
+                    or ""
+                ),
+                evidence,
+            )
+        )
+
+        owner_evidence = str(
+            normalized.get(
+                "requested_fact_owner_evidence",
+                "",
+            )
+            or ""
+        ).strip()
+
+        owner_evidence_normalized = (
+            normalize_evidence_text(
+                owner_evidence
+            )
+        )
+
+        normalized_owner_for_evidence = (
+            normalize_entity_name(
+                normalized.get(
+                    "requested_fact_owner",
+                    "",
+                )
+            )
+        )
+
+        # -------------------------------------------------
+        # Resolve the Excerpt BODY containing fact evidence
+        # -------------------------------------------------
+        #
+        # Metadata such as Title, Section and Section-Path
+        # must not be used as ownership evidence.
+        #
+
+        excerpt_blocks = re.split(
+            r"(?m)^Excerpt\s+\d+:\s*$",
+            context,
+        )
+
+        fact_excerpt_body = ""
+
+        for block in excerpt_blocks:
+
+            if not block.strip():
+                continue
+
+            lines = block.splitlines()
+
+            body_start = 0
+
+            # Skip leading blank lines.
+            while (
+                body_start < len(lines)
+                and not lines[
+                    body_start
+                ].strip()
+            ):
+                body_start += 1
+
+            # _format_grouped_context_blocks() writes Excerpt
+            # metadata directly above the chunk body without a
+            # guaranteed blank separator:
+            #
+            #   Section: ...
+            #   Section-Path: ...
+            #   <chunk body starts here>
+            #
+            # Therefore skip only the known leading metadata
+            # records instead of scanning until a blank line.
+            while body_start < len(lines):
+
+                line = lines[
+                    body_start
+                ].strip()
+
+                if (
+                    line.startswith(
+                        "Section:"
+                    )
+                    or line.startswith(
+                        "Section-Path:"
+                    )
+                ):
+                    body_start += 1
+                    continue
+
+                if not line:
+                    body_start += 1
+                    continue
+
+                break
+
+            body_lines = []
+
+            for body_line in lines[
+                body_start:
+            ]:
+
+                stripped_body_line = (
+                    body_line.strip()
+                )
+
+                # A re.split() on "Excerpt N:" alone can leave
+                # the next Source metadata at the end of this
+                # block. Never treat that metadata as part of
+                # the Excerpt body.
+                if (
+                    stripped_body_line
+                    == "---"
+                    or re.fullmatch(
+                        r"Source\s+\d+:",
+                        stripped_body_line,
+                        flags=re.IGNORECASE,
+                    )
+                ):
+                    break
+
+                body_lines.append(
+                    body_line
+                )
+
+            body = "\n".join(
+                body_lines
+            ).strip()
+
+            body_normalized = (
+                normalize_evidence_text(
+                    body
+                )
+            )
+
+            if (
+                evidence_normalized
+                and evidence_normalized
+                in body_normalized
+            ):
+                fact_excerpt_body = body
+                break
+
+        fact_excerpt_body_normalized = (
+            normalize_evidence_text(
+                fact_excerpt_body
+            )
+        )
+
+        evidence_in_excerpt_body = (
+            bool(
+                fact_excerpt_body_normalized
+            )
+            and evidence_normalized
+            in fact_excerpt_body_normalized
+        )
+
+        # -------------------------------------------------
+        # Validate model-provided owner evidence
+        # -------------------------------------------------
+
+        normalized_owner_evidence = (
+            normalize_entity_name(
+                owner_evidence
+            )
+        )
+
+        model_owner_evidence_valid = (
+            bool(
+                owner_evidence_normalized
+            )
+            and bool(
+                normalized_owner_for_evidence
+            )
+            and bool(
+                fact_excerpt_body_normalized
+            )
+            and owner_evidence_normalized
+            in fact_excerpt_body_normalized
+            and normalized_owner_for_evidence
+            in normalized_owner_evidence
+        )
+
+        # -------------------------------------------------
+        # Deterministic same-Excerpt owner fallback
+        # -------------------------------------------------
+        #
+        # If the model copied the fact sentence again instead
+        # of a useful owner sentence, search only the same
+        # Excerpt BODY for an explicit owner mention.
+        #
+
+        resolved_owner_evidence = (
+            owner_evidence
+            if model_owner_evidence_valid
+            else ""
+        )
+
+        if (
+            not resolved_owner_evidence
+            and normalized_owner_for_evidence
+            and fact_excerpt_body
+        ):
+
+            candidate_parts = re.split(
+                r"(?<=[.!?])\s+|\n+",
+                fact_excerpt_body,
+            )
+
+            for candidate in candidate_parts:
+
+                candidate = (
+                    candidate
+                    or ""
+                ).strip()
+
+                if not candidate:
+                    continue
+
+                # Metadata is never semantic ownership evidence.
+                metadata_prefixes = (
+                    "source ",
+                    "title:",
+                    "url:",
+                    "knowledge-base:",
+                    "document-type:",
+                    "section:",
+                    "section-path:",
+                    "city:",
+                    "country:",
+                    "category:",
+                    "payment-methods:",
+                )
+
+                if candidate.casefold().startswith(
+                    metadata_prefixes
+                ):
+                    continue
+
+                candidate_owner_text = (
+                    normalize_entity_name(
+                        candidate
+                    )
+                )
+
+                if (
+                    normalized_owner_for_evidence
+                    in candidate_owner_text
+                ):
+                    resolved_owner_evidence = (
+                        candidate[:1000]
+                    )
+                    break
+
+        owner_evidence_resolved = bool(
+            resolved_owner_evidence
+        )
+
+        if owner_evidence_resolved:
+
+            normalized[
+                "requested_fact_owner_evidence"
+            ] = resolved_owner_evidence
+
+        # -------------------------------------------------
+        # Final requested-fact acceptance
+        # -------------------------------------------------
+
+        if (
+            not evidence_exists
+            or not fact_scope_supported
+            or not evidence_in_excerpt_body
+            or not owner_evidence_resolved
+        ):
+
+            normalized[
+                "requested_fact_status"
+            ] = "not_specified"
+
+            normalized[
+                "requested_fact_value"
+            ] = ""
+
+            normalized[
+                "requested_fact_owner"
+            ] = ""
+
+            normalized[
+                "requested_fact_evidence"
+            ] = ""
+
+            normalized[
+                "requested_fact_owner_evidence"
+            ] = ""
+
     return (
         normalized,
         None,
@@ -5719,6 +6716,14 @@ def _render_scope_answer(
     requested_owner = str(
         facts.get(
             "requested_fact_owner",
+            "",
+        )
+        or ""
+    ).strip()
+
+    requested_condition = str(
+        facts.get(
+            "requested_fact_condition",
             "",
         )
         or ""
@@ -5783,12 +6788,31 @@ def _render_scope_answer(
                 f"{requested_fact} mit "
                 f"{requested_value} angegeben."
             )
+
+            if requested_condition:
+                paragraphs.append(
+                    "Zusätzlich gilt: "
+                    + requested_condition.rstrip(
+                        "."
+                    )
+                    + "."
+                )
+
         else:
             paragraphs.append(
                 f"For {requested_entity}, "
                 f"{requested_fact} is specified as "
                 f"{requested_value}."
             )
+
+            if requested_condition:
+                paragraphs.append(
+                    "Additionally: "
+                    + requested_condition.rstrip(
+                        "."
+                    )
+                    + "."
+                )
 
     elif requested_status == "not_specified":
         if is_de:

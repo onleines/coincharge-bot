@@ -630,6 +630,416 @@ TESTS = [
         max_total_ms=12000,
     ),
 
+    # =========================================================
+    # Adversarial / paraphrase scope regression matrix
+    # =========================================================
+
+    TestCase(
+        name="Adversarial Wallet 10k Limit",
+        message=(
+            "Hat die Coinsnap Wallet ein 10k Auszahlungslimit?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "coinsnap wallet",
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "10.000",
+                "10,000",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap wallet hat ein 10",
+            "coinsnap wallet beträgt",
+            "coinsnap wallet gilt",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Coinsnap More Than 10k",
+        message=(
+            "Kann ich bei Coinsnap mehr als 10.000 Euro auszahlen?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "coinsnap",
+        ],
+        required_reply_any_groups=[
+            [
+                "nicht angegeben",
+                "nicht spezifiziert",
+                "kein wert",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap hat ein auszahlungslimit von 10",
+            "bei coinsnap gilt ein auszahlungslimit von 10",
+            "coinsnap auszahlungslimit beträgt 10",
+            "coinsnap kann bis zu 10.000",
+            "coinsnap kann bis zu 10,000",
+        ],
+        required_source_terms=[
+            "coinsnap.io",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Payout Fee Short",
+        message=(
+            "Was kostet die Auszahlung aufs Bankkonto?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_any_groups=[
+            [
+                "nicht angegeben",
+                "nicht spezifiziert",
+                "dfx",
+                "bringin",
+                "partner",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap auszahlungsgebühr beträgt",
+            "coinsnap verlangt für die auszahlung",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Bringin Limit Short",
+        message=(
+            "Bringin Limit erhöhen wo?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "kyc",
+                "dokument",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap wallet beträgt",
+            "coinsnap wallet gilt",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Coinsnap KYC Assumption",
+        message=(
+            "Muss ich bei der Coinsnap Wallet KYC machen, "
+            "um mehr auszahlen zu können?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "coinsnap wallet",
+            "bringin",
+            "kyc",
+        ],
+        forbidden_reply_terms=[
+            "coinsnap wallet verlangt kyc",
+            "coinsnap wallet erfordert kyc",
+            "kyc bei der coinsnap wallet erforderlich",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial One Percent Coinsnap",
+        message=(
+            "Ist die 1% Auszahlungsgebühr von Coinsnap?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "coinsnap",
+        ],
+        required_reply_any_groups=[
+            [
+                "nicht angegeben",
+                "nicht spezifiziert",
+                "kein wert",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap ist 1% auszahlungsgebühr",
+            "coinsnap ist 1 % auszahlungsgebühr",
+            "coinsnap verlangt 1%",
+            "coinsnap verlangt 1 %",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Who Charges Payout Fee",
+        message=(
+            "Coinsnap oder Bringin – wer nimmt die "
+            "Auszahlungsgebühr?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "1 %",
+                "1%",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap nimmt die auszahlungsgebühr",
+            "coinsnap verlangt die auszahlungsgebühr",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Foreign Payout Account",
+        message=(
+            "Kann ich bei Bringin auf das Bankkonto "
+            "meiner Frau auszahlen?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "gleichen namen",
+                "selben namen",
+                "same name",
+                "not possible",
+                "nicht möglich",
+                "nicht moeglich",
+            ],
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial SEPA Instant Short",
+        message=(
+            "Gehen Bringin Auszahlungen sofort per SEPA?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+            "sepa",
+        ],
+        required_reply_any_groups=[
+            [
+                "instant",
+                "sofort",
+            ],
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial DFX vs Bringin Fee",
+        message=(
+            "Was kostet DFX und gilt das auch für Bringin?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "dfx",
+            "bringin",
+        ],
+        forbidden_reply_terms=[
+            "dfx und bringin verlangen dieselbe gebühr",
+            "gleiche gebühr bei dfx und bringin",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Wallet Daily Limit Short",
+        message=(
+            "Wallet tägliches Limit?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "angegeben",
+        ],
+        forbidden_reply_terms=[
+            "tägliches limit von 10.000",
+            "tägliches limit von 10,000",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Bringin Monthly Limit",
+        message=(
+            "Wie viel kann ich mit Bringin im Monat auszahlen?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "10.000",
+                "10,000",
+            ],
+            [
+                "monat",
+                "monthly",
+            ],
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Bringin Three Thousand",
+        message=(
+            "Sind 3000 Euro das Coinsnap Zahlungslimit?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "3.000",
+                "3,000",
+                "3000",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap zahlungslimit beträgt",
+            "coinsnap wallet beträgt 3",
+            "coinsnap wallet gilt",
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Bringin Minimum Casual",
+        message=(
+            "Wie klein darf eine Bringin Zahlung sein?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_terms=[
+            "bringin",
+        ],
+        required_reply_any_groups=[
+            [
+                "11.000",
+                "11,000",
+            ],
+            [
+                "sat",
+                "sats",
+            ],
+        ],
+        max_total_ms=12000,
+    ),
+
+    TestCase(
+        name="Adversarial Bringin Fee Compound",
+        message=(
+            "Wer berechnet die Bankauszahlungsgebühr "
+            "und wie hoch ist sie?"
+        ),
+        site="coinsnap.io",
+        lang="de",
+        origin="https://coinsnap.io",
+        expected_collection="kb_coinsnap_v2",
+        require_no_repair=False,
+        require_suggestions=False,
+        required_reply_any_groups=[
+            [
+                "nicht angegeben",
+                "nicht spezifiziert",
+                "dfx",
+                "bringin",
+                "partner",
+            ],
+        ],
+        forbidden_reply_terms=[
+            "coinsnap berechnet die bankauszahlungsgebühr",
+            "coinsnap verlangt die bankauszahlungsgebühr",
+        ],
+        max_total_ms=12000,
+    ),
+
     TestCase(
         name="Scope Direct Bringin",
         message=(
