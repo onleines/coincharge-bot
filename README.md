@@ -13,73 +13,43 @@ Instead of answering from general AI knowledge alone, the system retrieves relev
 
 The assistant searches these sources, selects relevant passages and uses them as context for generating an answer.
 
-The goal is to provide answers that are not only useful, but also grounded in the underlying source material.
+The goal is to provide useful answers that are grounded in the underlying source material.
 
 ---
 
-## How it works
+## WordPress Plugin
 
-A typical request follows this flow:
+The easiest way to use Coincharge Support Chat on a WordPress website is with the **Coincharge Support Chat WordPress Plugin**.
+
+### Download
+
+**Latest version: v1.6.0**
+
+[Download Coincharge Support Chat WordPress Plugin](https://github.com/onleines/coincharge-bot/releases/latest)
+
+The installable WordPress ZIP file can be found under **Assets** on the release page.
+
+Current plugin file:
 
 ```text
-Visitor
-   ↓
-WordPress Support Plugin
-   ↓
-Coincharge Support API
-   ↓
-Query Routing & Retrieval
-   ↓
-Knowledge Bases
-   ├── coincharge.io
-   ├── coinsnap.io
-   ├── coinpages.io
-   └── docs.coinsnap.io
-   ↓
-Evidence-grounded AI answer
-   ↓
-WordPress Support Chat
+coincharge-support-chat-1.6.0.zip
 ```
 
-The backend determines which knowledge source is most relevant to the user's question.
-
-For example:
-
-- Questions about BTCPay Server can be routed primarily to Coincharge content.
-- Questions about Coinsnap products and plugins can prioritize Coinsnap content.
-- Questions such as "Where can I pay with Bitcoin in Frankfurt?" can use Coinpages.
-- Developer questions about API keys, invoices or webhooks can prioritize the Coinsnap developer documentation.
-
-The retrieval system can also combine information from multiple sources when appropriate.
-
 ---
 
-## WordPress integration
+## Quick Start
 
-The support interface can be integrated into multiple WordPress websites using the **Coincharge Support Search** WordPress plugin included with this project.
+### 1. Install the WordPress plugin
 
-The plugin connects the WordPress website to the central Coincharge Support API.
+Download the latest plugin ZIP from:
 
-This means that the same support system can be used on different websites without installing the AI backend separately on every WordPress installation.
-
-Example installations include:
-
-- https://leinert.com/bitcoin-support-chat/
-- https://coincharge.io/bitcoin-support-chat/
-
-The WordPress site acts as the frontend while the central support backend handles retrieval and answer generation.
-
----
-
-## Installing the WordPress plugin
-
-Download the current plugin ZIP file from the GitHub Releases section.
+https://github.com/onleines/coincharge-bot/releases/latest
 
 In WordPress:
 
 1. Open **Plugins → Add New Plugin**
 2. Select **Upload Plugin**
-3. Upload the Coincharge Support Search ZIP file
+3. Upload `coincharge-support-chat-1.6.0.zip`
 4. Install and activate the plugin
 5. Open the plugin settings and verify the Support API URL
 
@@ -91,7 +61,7 @@ https://bot.coincharge.io/chat
 
 ---
 
-## Create the Support Chat page
+### 2. Create the Support Chat page
 
 Each WordPress website using the plugin needs a dedicated support page.
 
@@ -115,43 +85,55 @@ Add the following shortcode to the page:
 
 Publish the page.
 
-The plugin will use this page to display the search interface, generated answers, sources and suggested follow-up questions.
-
-Examples:
-
-```text
-https://leinert.com/bitcoin-support-chat/
-https://coincharge.io/bitcoin-support-chat/
-```
+The plugin uses this page to display the support interface, generated answers, sources and suggested follow-up questions.
 
 ---
 
-## Using the same system on multiple websites
+### 3. Test the Support Chat
+
+Open:
+
+```text
+https://example.com/bitcoin-support-chat/
+```
+
+and enter a question.
+
+Example installations:
+
+- https://leinert.com/bitcoin-support-chat/
+- https://coincharge.io/bitcoin-support-chat/
+
+---
+
+## Using the plugin on multiple websites
 
 The WordPress plugin is designed so that one central Coincharge Support Chat backend can serve multiple websites.
+
+Each WordPress installation only needs the plugin and a connection to the central Support API.
 
 For example:
 
 ```text
 leinert.com
-      │
+     │
 coincharge.io
-      │
+     │
 coinpages.io
-      │
+     │
 coinsnap.io
-      │
-      ▼
+     │
+     ▼
 WordPress Support Plugin
-      │
-      ▼
+     │
+     ▼
 https://bot.coincharge.io/chat
-      │
-      ▼
+     │
+     ▼
 Coincharge Support Backend
 ```
 
-This makes it possible to maintain the knowledge retrieval and AI logic centrally while using the support interface across multiple WordPress websites.
+This makes it possible to maintain knowledge retrieval and AI logic centrally while providing the support interface on multiple WordPress websites.
 
 The originating website and language can be passed to the backend so that retrieval and responses can be adapted to the context of the website.
 
@@ -159,38 +141,81 @@ The originating website and language can be passed to the backend so that retrie
 
 ## Global Support Search
 
-In addition to the dedicated support page, the WordPress plugin can display a global support search interface on the website.
+In addition to the dedicated Support Chat page, the WordPress plugin can provide a global support search interface on the website.
 
-A visitor can enter a question from another page of the website and is then directed to:
+Visitors can enter a question from another page and are then directed to:
 
 ```text
 /bitcoin-support-chat/?q=...
 ```
 
-The support page can automatically process the question and display the answer.
+The Support Chat page can automatically process the question and display the generated answer.
 
 The global support search can be enabled or disabled in the WordPress plugin settings.
 
 ---
 
-## Knowledge sources
+## How it works
 
-Coincharge Support Chat currently uses separate knowledge collections for the different content sources:
+A typical request follows this flow:
 
-| Source | Purpose |
-| --- | --- |
-| coincharge.io | Bitcoin, Lightning, BTCPay Server, merchant and payment information |
-| coinsnap.io | Coinsnap products, plugins, merchant and support content |
-| coinpages.io | Bitcoin acceptance locations and merchant directory content |
-| docs.coinsnap.io | Coinsnap developer and API documentation |
+```text
+Visitor
+   │
+   ▼
+WordPress Support Plugin
+   │
+   ▼
+Coincharge Support API
+   │
+   ▼
+Query Routing & Retrieval
+   │
+   ▼
+Knowledge Bases
+   ├── coincharge.io
+   ├── coinsnap.io
+   ├── coinpages.io
+   └── docs.coinsnap.io
+   │
+   ▼
+Evidence-grounded AI answer
+   │
+   ▼
+WordPress Support Chat
+```
 
-The backend can route queries between these collections and combine results when necessary.
+The backend determines which knowledge source is most relevant to the user's question.
 
-Developer queries, for example, can prioritize the Coinsnap developer documentation. Location-related queries can prioritize Coinpages. :contentReference[oaicite:1]{index=1}
+For example:
+
+- Questions about Bitcoin, Lightning or BTCPay Server can be routed primarily to Coincharge content.
+- Questions about Coinsnap products and plugins can prioritize Coinsnap content.
+- Questions such as "Where can I pay with Bitcoin in Frankfurt?" can use Coinpages.
+- Developer questions about API keys, invoices or webhooks can prioritize the Coinsnap developer documentation.
+
+The retrieval system can also combine information from multiple sources when appropriate.
 
 ---
 
-## Evidence grounding
+## Knowledge Sources
+
+Coincharge Support Chat currently uses separate knowledge collections for different content sources.
+
+| Source | Purpose |
+| --- | --- |
+| [coincharge.io](https://coincharge.io/) | Bitcoin, Lightning, BTCPay Server, merchant and payment information |
+| [coinsnap.io](https://coinsnap.io/) | Coinsnap products, plugins, merchant and support content |
+| [coinpages.io](https://coinpages.io/) | Bitcoin acceptance locations and merchant directory content |
+| [docs.coinsnap.io](https://docs.coinsnap.io/) | Coinsnap developer and API documentation |
+
+The backend can route queries between these collections and combine results when necessary.
+
+Developer queries, for example, can prioritize the Coinsnap developer documentation, while location-related queries can prioritize Coinpages.
+
+---
+
+## Evidence Grounding
 
 A major goal of the project is to reduce unsupported or incorrectly attributed AI answers.
 
@@ -216,7 +241,7 @@ When the available source material does not provide a sufficiently clear answer,
 
 ---
 
-## Source-aware retrieval
+## Source-Aware Retrieval
 
 The backend supports different retrieval paths depending on the question.
 
@@ -240,7 +265,7 @@ The system can retrieve information across the configured knowledge collections 
 
 ## Architecture
 
-The project currently consists of several components:
+The project consists of several components:
 
 ```text
 WordPress
@@ -256,25 +281,25 @@ FastAPI Broker
     ├── Evidence Grounding
     ├── Answer Generation
     └── Question Analytics
-           │
-           ▼
-        Qdrant
-           │
-           ├── Coincharge Knowledge Base
-           ├── Coinsnap Knowledge Base
-           ├── Coinpages Knowledge Base
-           └── Coinsnap Developer Documentation
+             │
+             ▼
+           Qdrant
+             │
+             ├── Coincharge Knowledge Base
+             ├── Coinsnap Knowledge Base
+             ├── Coinpages Knowledge Base
+             └── Coinsnap Developer Documentation
 ```
 
-The backend uses Qdrant for the knowledge collections and an OpenAI model for embeddings and answer generation.
+The backend uses Qdrant for the knowledge collections and OpenAI models for embeddings and answer generation.
 
 ---
 
-## Updating the knowledge base
+## Updating the Knowledge Base
 
 Website content is indexed separately from the WordPress plugin.
 
-When articles on Coincharge, Coinsnap or Coinpages are changed, the corresponding knowledge base can be re-indexed so that the support assistant uses the updated information.
+When articles on Coincharge, Coinsnap, Coinpages or the Coinsnap developer documentation are changed, the corresponding knowledge base can be re-indexed so that the support assistant uses the updated information.
 
 This allows editors to improve the quality of AI answers by improving the underlying source content without modifying the WordPress frontend.
 
@@ -305,7 +330,7 @@ python3 tools/regression_test.py
 
 ---
 
-## Repository structure
+## Repository Structure
 
 A simplified overview:
 
@@ -321,7 +346,7 @@ coincharge-bot/
 │   └── Regression and analysis tools
 │
 ├── wordpress/
-│   └── Coincharge Support Search plugin
+│   └── Coincharge Support Chat WordPress plugin
 │
 ├── docs/
 │   └── Project documentation
@@ -349,13 +374,14 @@ Use environment configuration for secrets.
 
 ---
 
-## WordPress Plugin
+## WordPress Plugin Features
 
 The WordPress plugin can be used independently on multiple WordPress websites that connect to the same Coincharge Support backend.
 
 The plugin provides:
 
-- Support chat via shortcode
+- AI-powered Support Chat
+- Support Chat via shortcode
 - Global support search
 - Central API connection
 - Source display
@@ -364,23 +390,27 @@ The plugin provides:
 - Language-aware routing
 - Optional local debug logging
 
-Shortcode:
+### Shortcode
 
 ```text
 [cc_support_search]
 ```
 
-Default support page:
+### Default Support Page
 
 ```text
 /bitcoin-support-chat/
 ```
 
-Default API:
+### Default API
 
 ```text
 https://bot.coincharge.io/chat
 ```
+
+### Latest Plugin Release
+
+https://github.com/onleines/coincharge-bot/releases/latest
 
 ---
 
@@ -403,11 +433,13 @@ Production secrets should always be supplied through environment variables or an
 
 ---
 
-## Project status
+## Project Status
 
 Coincharge Support Chat is an actively developed project.
 
-Retrieval quality and answer grounding depend heavily on the quality and clarity of the indexed source content. Both the software and the underlying content structure are therefore continuously improved.
+Retrieval quality and answer grounding depend heavily on the quality and clarity of the indexed source content.
+
+Both the software and the underlying content structure are therefore continuously improved.
 
 ---
 
