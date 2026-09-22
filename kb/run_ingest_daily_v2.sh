@@ -47,5 +47,8 @@ run_one "coinsnap.io" "https://coinsnap.io/sitemap_index.xml" "kb_coinsnap_v2"
 # Coinpages
 run_one "coinpages.io" "https://coinpages.io/sitemap_index.xml" "kb_coinpages_v2"
 
+# Coinsnap Developer Documentation
+run_one "docs.coinsnap.io" "https://docs.coinsnap.io/sitemap.xml" "kb_coinsnap_docs_v2"
+
 echo "" | tee -a "$log"
 echo "[ingest] done ${ts}" | tee -a "$log"

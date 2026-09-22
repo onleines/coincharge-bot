@@ -27,8 +27,8 @@ services:
 
       # ---- Speed / "B" tuning ----
       - MAX_CONTEXT_CHARS=9000
-      - TOP_K=8
-      - PER_COLLECTION_LIMIT=5
+      - TOP_K=14
+      - PER_COLLECTION_LIMIT=12
       - MAX_QUERY_VARIANTS=1
       - OPENCLAW_TIMEOUT_S=30
       - HTTP_CONNECT_TIMEOUT_S=5
