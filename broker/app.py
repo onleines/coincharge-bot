@@ -952,6 +952,7 @@ def _preferred_collections(
     List[str],
     Dict[str, Any],
 ]:
+    site = _norm_site(site)
 
     intent = _determine_primary_intent(
         site,
@@ -962,8 +963,49 @@ def _preferred_collections(
         "primary"
     ]
 
-    if primary == COL_COINSNAP_DOCS:
+    # Strict Coinsnap site scope:
+    # Requests originating from coinsnap.io or docs.coinsnap.io
+    # may ONLY use the Coinsnap website and developer-docs KBs.
+    if site in {
+        "coinsnap.io",
+        "docs.coinsnap.io",
+    }:
+        original_primary = primary
 
+        # An intent such as Coinpages or Coincharge must never
+        # escape the Coinsnap-only source scope.
+        if primary not in {
+            COL_COINSNAP,
+            COL_COINSNAP_DOCS,
+        }:
+            primary = COL_COINSNAP
+
+            intent = {
+                **intent,
+                "primary": COL_COINSNAP,
+                "reason": "coinsnap_site_scope",
+                "strong": False,
+                "original_primary": original_primary,
+            }
+
+        if primary == COL_COINSNAP_DOCS:
+            order = [
+                COL_COINSNAP_DOCS,
+                COL_COINSNAP,
+            ]
+        else:
+            order = [
+                COL_COINSNAP,
+                COL_COINSNAP_DOCS,
+            ]
+
+        return (
+            order,
+            intent,
+        )
+
+    # All other websites may search all knowledge bases.
+    if primary == COL_COINSNAP_DOCS:
         order = [
             COL_COINSNAP_DOCS,
             COL_COINSNAP,
@@ -972,7 +1014,6 @@ def _preferred_collections(
         ]
 
     elif primary == COL_COINSNAP:
-
         order = [
             COL_COINSNAP,
             COL_COINSNAP_DOCS,
@@ -981,7 +1022,6 @@ def _preferred_collections(
         ]
 
     elif primary == COL_COINPAGES:
-
         order = [
             COL_COINPAGES,
             COL_COINCHARGE,
@@ -990,7 +1030,6 @@ def _preferred_collections(
         ]
 
     else:
-
         order = [
             COL_COINCHARGE,
             COL_COINSNAP,
@@ -1002,7 +1041,6 @@ def _preferred_collections(
         order,
         intent,
     )
-
 
 # -----------------------------------------------------------------------------
 # Coinpages helpers
@@ -2023,6 +2061,24 @@ def _apply_scope_scores(
             if str(value).strip()
         )
 
+        # Navigation/recommendation sections are not substantive
+        # article evidence and must not outrank the actual content.
+        navigation_section = (
+            section_title.strip().casefold()
+            in {
+                "related blog posts",
+                "related posts",
+            }
+            or "related blog posts" in section_path.casefold()
+        )
+
+        if navigation_section:
+            result["scope_score"] = -1.0
+            result["scope_debug"] = {
+                "navigation_section": True,
+            }
+            continue
+
         title_overlap = (
             _scope_overlap_score(
                 query_tokens,
@@ -2670,6 +2726,248 @@ def _group_results_by_url(
         :GROUPED_TOP_URLS
     ]
 
+def _expand_structured_howto_top_group(
+    groups: List[Dict[str, Any]],
+    query: str,
+) -> List[Dict[str, Any]]:
+    """
+    If the top result is a very strong match for a how-to question
+    and the article contains numbered Step sections, load the
+    complete step-by-step portion of that article from Qdrant.
+
+    This avoids answering a tutorial question from only a few
+    independently ranked chunks.
+    """
+
+    if not groups:
+        return groups
+
+    q = (query or "").strip().casefold()
+
+    howto_query = bool(
+        re.search(
+            r"\b("
+            r"how\s+(?:do|can)\s+i|"
+            r"how\s+to|"
+            r"setup|set\s+up|"
+            r"connect|configure|install|"
+            r"einrichten|verbinden|konfigurieren"
+            r")\b",
+            q,
+        )
+    )
+
+    if not howto_query:
+        return groups
+
+    top_group = groups[0]
+
+    url = str(
+        top_group.get("url", "")
+        or ""
+    ).strip()
+
+    collection = str(
+        top_group.get("collection", "")
+        or ""
+    ).strip()
+
+    title = str(
+        top_group.get("title", "")
+        or ""
+    ).strip()
+
+    if not url or not collection:
+        return groups
+
+    # Only expand when the page title itself is a strong match.
+    title_overlap = _scope_overlap_score(
+        _scope_tokens(query),
+        title,
+    )
+
+    if title_overlap < 0.60:
+        return groups
+
+    try:
+        points, _ = qdrant.scroll(
+            collection_name=collection,
+            scroll_filter=qm.Filter(
+                must=[
+                    qm.FieldCondition(
+                        key="url",
+                        match=qm.MatchValue(
+                            value=url
+                        ),
+                    )
+                ]
+            ),
+            limit=100,
+            with_payload=True,
+            with_vectors=False,
+        )
+    except Exception:
+        return groups
+
+    all_hits: List[Dict[str, Any]] = []
+
+    for point in points:
+        payload = dict(
+            point.payload or {}
+        )
+
+        payload["id"] = str(
+            point.id
+        )
+        payload["collection"] = (
+            collection
+        )
+
+        all_hits.append(
+            payload
+        )
+
+    if not all_hits:
+        return groups
+
+    all_hits.sort(
+        key=lambda hit: int(
+            hit.get(
+                "chunk_index",
+                999999,
+            )
+        )
+    )
+
+    # Ignore navigation / promotional parts of an article.
+    substantive_hits = []
+
+    for hit in all_hits:
+        section_title = str(
+            hit.get(
+                "section_title",
+                "",
+            )
+            or ""
+        ).strip().casefold()
+
+        section_path = " > ".join(
+            str(value)
+            for value in (
+                hit.get(
+                    "section_path",
+                    []
+                )
+                or []
+            )
+            if str(value).strip()
+        ).casefold()
+
+        navigation = (
+            "related blog posts"
+            in section_path
+            or section_title in {
+                "related blog posts",
+                "about the author",
+                "about author",
+                "sign up",
+                "sign up now and start to accept bitcoin.",
+            }
+        )
+
+        if navigation:
+            continue
+
+        substantive_hits.append(
+            hit
+        )
+
+    step_hits = [
+        hit
+        for hit in substantive_hits
+        if re.match(
+            r"^(?:step|schritt|étape)\s+\d+\b",
+            str(
+                hit.get(
+                    "section_title",
+                    "",
+                )
+                or ""
+            ).strip(),
+            flags=re.IGNORECASE,
+        )
+    ]
+
+    # Only treat it as a structured tutorial when there are
+    # multiple numbered steps.
+    if len(step_hits) < 2:
+        return groups
+
+    first_step = min(
+        int(
+            hit.get(
+                "chunk_index",
+                999999,
+            )
+        )
+        for hit in step_hits
+    )
+
+    last_step = max(
+        int(
+            hit.get(
+                "chunk_index",
+                -1,
+            )
+        )
+        for hit in step_hits
+    )
+
+    expanded_hits = [
+        hit
+        for hit in substantive_hits
+        if (
+            int(
+                hit.get(
+                    "chunk_index",
+                    999999,
+                )
+            )
+            >= max(
+                0,
+                first_step - 1,
+            )
+            and int(
+                hit.get(
+                    "chunk_index",
+                    999999,
+                )
+            )
+            <= last_step
+        )
+    ]
+
+    # Safety limit: expand only the top tutorial, and do not
+    # allow an unexpectedly large document to dominate context.
+    expanded_hits = expanded_hits[:14]
+
+    if len(expanded_hits) <= len(
+        top_group.get(
+            "selected_hits",
+            [],
+        )
+    ):
+        return groups
+
+    top_group[
+        "selected_hits"
+    ] = expanded_hits
+
+    top_group[
+        "howto_expanded"
+    ] = True
+
+    return groups
 
 # -----------------------------------------------------------------------------
 # Context formatting
@@ -3475,6 +3773,13 @@ def retrieve_context(
         _group_results_by_url(
             selected,
             intent,
+        )
+    )
+
+    groups = (
+        _expand_structured_howto_top_group(
+            groups,
+            query,
         )
     )
 
@@ -5452,6 +5757,67 @@ For every scope-sensitive fact, determine its owner from CONTEXT.
 
 The sentence containing that fact must make the owner explicit.
 
+MULTI-ENTITY AND MULTI-FACT RULES:
+
+- Do NOT assume that all requested facts have the same owner.
+
+- A question may involve multiple entities, partners or services,
+  and different facts in the same answer may belong to different
+  owners.
+
+- Determine the owner of EACH fee, percentage, limit, KYC rule,
+  payout condition or other scope-sensitive fact independently.
+
+- Do NOT require every fact to belong to the most prominent entity
+  named in the user's question.
+
+- If a total combines charges belonging to multiple entities, do
+  NOT attribute that total to one component owner unless CONTEXT
+  explicitly says that this entity charges the entire total.
+
+- If CONTEXT explicitly supports a combined total, describe it as
+  belonging to the combined setup and identify the owner of every
+  component separately.
+
+Example:
+
+"For the combined Coinsnap + DFX payout setup, the supported total
+cost is 1.2%. Coinsnap charges a 1% transaction fee. DFX charges a
+0.2% bank payout fee."
+
+Do NOT rewrite this as:
+
+"DFX charges a total cost of 1.2%"
+
+when part of that total belongs to Coinsnap.
+
+BULLET OWNERSHIP RULE:
+
+- OWNER-FIRST applies to bullets and sub-bullets too.
+
+- A bullet or sub-bullet containing a fee, percentage, limit,
+  minimum, maximum, KYC rule, payout condition, restriction or
+  requirement must begin with its actual owner or an explicit
+  owner construction.
+
+GOOD:
+
+"- Coinsnap charges a 1% transaction fee."
+
+"- DFX charges a 0.2% bank payout fee."
+
+"- DFX applies a rolling 30-day payout limit of CHF 1,000."
+
+BAD:
+
+"- 1% Coinsnap transaction fee"
+
+"- 0.2% DFX bank payout fee"
+
+"- CHF 1,000 rolling limit with DFX"
+
+The sentence containing that fact must make the owner explicit.
+
 GOOD:
 
 "For [partner/service], the monthly payout limit is ..."
@@ -5478,6 +5844,11 @@ state that separately.
 
 Do not use outside knowledge.
 Do not guess.
+- The requested fact itself must be directly supported by CONTEXT.
+- Do not infer that something exists, is available, is used, or is likely true merely because CONTEXT describes a related capability.
+- If CONTEXT does not directly support the fact the user asked for, clearly say that the available context does not provide that information.
+- After stating that the requested information is not in CONTEXT, do not add speculation, possibilities, assumptions, or statements such as "may", "might", "probably", or "likely" about that unsupported fact.
+- A general ability to accept Bitcoin does not prove that a particular merchant, business, city, or location uses Coinsnap.
 
 If the draft has NO scope error, return:
 
@@ -5646,6 +6017,52 @@ For every related scope-sensitive fact:
   conditions of that process attached to that entity unless
   the Excerpt explicitly says otherwise.
 
+ATOMIC FACT COMPLETENESS RULES:
+
+- When the requested fact type is fees, preserve every distinct
+  directly supported fee, charge, percentage or conversion
+  spread that is relevant to the same setup.
+
+- The primary fee belonging to requested_entity should be the
+  requested fact.
+
+- Other directly supported fees of the SAME fact type must be
+  returned under related_facts, including facts belonging to
+  requested_entity itself and facts belonging to another
+  explicitly supported owner.
+
+- Example: a DFX payout setup may contain a DFX payout fee,
+  a DFX conversion spread and a separate Coinsnap transaction
+  fee. Do not collapse or silently omit these distinct charges.
+
+- When the requested fact is a limit, preserve intrinsic
+  qualifiers that define the limit itself, including rolling
+  periods, daily/monthly periods, per-merchant qualifiers,
+  per-transaction qualifiers and currencies.
+
+- Example: do not reduce "CHF 1,000 per merchant within any
+  rolling 30-day period" to only "CHF 1,000 per merchant".
+
+- Conditions for exceeding, increasing or changing a limit
+  belong in requested_fact_condition.
+
+RELATED FACT EVIDENCE COMPLETENESS:
+
+- owner_evidence for a related fact must support BOTH the owner
+  and the stated value.
+
+- owner_evidence may contain one sentence or a contiguous span
+  of two adjacent sentences from the SAME Excerpt when one
+  sentence establishes the owner and the adjacent sentence
+  states the value.
+
+- If a related fact has a numeric or textual value, that value
+  must be directly present in owner_evidence.
+
+- Never invent a related fact merely to make the answer more
+  complete.
+
+
 REQUESTED FACT RULES:
 
 - "requested_fact_status" may be "specified" ONLY if the fact
@@ -5762,6 +6179,8 @@ def _extract_scope_facts(
     context: str,
     session_id: Optional[str],
     lang: str,
+    requested_entity_override: Optional[str] = None,
+    requested_fact_override: Optional[str] = None,
 ) -> Tuple[
     Optional[Dict[str, Any]],
     Optional[str],
@@ -5771,15 +6190,52 @@ def _extract_scope_facts(
         lang=lang,
     )
 
+    override_lines = []
+
+    if requested_entity_override:
+        override_lines.append(
+            "requested_entity MUST be exactly: "
+            + requested_entity_override
+        )
+
+    if requested_fact_override:
+        override_lines.append(
+            "requested_fact MUST be exactly: "
+            + requested_fact_override
+        )
+
+    atomic_override = ""
+
+    if override_lines:
+        atomic_override = (
+            "ATOMIC REQUEST OVERRIDE:\n"
+            + "\n".join(override_lines)
+            + "\nEvaluate ONLY this requested fact TYPE. "
+            + "Do not merge it with different requested fact "
+            + "types from the original question. "
+            + "Preserve all directly supported qualifiers that "
+            + "belong to this fact, including time periods, "
+            + "thresholds and conditions. "
+            + "Related facts of the SAME fact type that belong "
+            + "to other explicitly supported owners or services "
+            + "should still be returned in related_facts."
+        )
+
     user_prompt = f"""
 Original question:
 
 {message}
 
+{atomic_override}
+
 Extract the requested entity, requested fact and all directly
 relevant scope-sensitive facts from CONTEXT.
 
+If an ATOMIC REQUEST OVERRIDE is present, requested_entity and
+requested_fact must exactly match the override.
+
 Return only the required JSON object.
+
 """.strip()
 
     raw, error = _call_openclaw(
@@ -5870,48 +6326,477 @@ Return only the required JSON object.
 
     related_facts = []
 
+    def normalize_related_text(
+        value: str,
+    ) -> str:
+
+        value = (
+            value
+            or ""
+        ).casefold()
+
+        value = value.replace(
+            "\xa0",
+            " ",
+        )
+
+        return re.sub(
+            r"\s+",
+            " ",
+            value,
+        ).strip()
+
+    def normalize_related_owner(
+        value: str,
+    ) -> str:
+
+        value = normalize_related_text(
+            value
+        )
+
+        value = re.sub(
+            r"[^a-z0-9äöüß]+",
+            " ",
+            value,
+        )
+
+        return re.sub(
+            r"\s+",
+            " ",
+            value,
+        ).strip()
+
+    metadata_prefixes = (
+        "source ",
+        "title:",
+        "url:",
+        "knowledge-base:",
+        "document-type:",
+        "section:",
+        "section-path:",
+        "city:",
+        "country:",
+        "category:",
+        "payment-methods:",
+    )
+
+    # -----------------------------------------------------
+    # Build clean Excerpt bodies
+    # -----------------------------------------------------
+    #
+    # Related-fact ownership may only be supported by actual
+    # Excerpt content. Source titles and other metadata are
+    # deliberately excluded.
+    #
+
+    related_excerpt_bodies = []
+
+    excerpt_blocks = re.split(
+        r"(?m)^Excerpt\s+\d+:\s*$",
+        context,
+    )
+
+    for block in excerpt_blocks:
+
+        if not block.strip():
+            continue
+
+        lines = block.splitlines()
+
+        body_start = 0
+
+        while (
+            body_start < len(lines)
+            and not lines[
+                body_start
+            ].strip()
+        ):
+            body_start += 1
+
+        # Skip known Excerpt metadata at the beginning.
+        while body_start < len(lines):
+
+            line = lines[
+                body_start
+            ].strip()
+
+            if (
+                line.startswith(
+                    "Section:"
+                )
+                or line.startswith(
+                    "Section-Path:"
+                )
+            ):
+                body_start += 1
+                continue
+
+            if not line:
+                body_start += 1
+                continue
+
+            break
+
+        body_lines = []
+
+        for body_line in lines[
+            body_start:
+        ]:
+
+            stripped = (
+                body_line.strip()
+            )
+
+            # Do not leak metadata from the following source
+            # into the current Excerpt body.
+            if (
+                stripped == "---"
+                or re.fullmatch(
+                    r"Source\s+\d+:",
+                    stripped,
+                    flags=re.IGNORECASE,
+                )
+            ):
+                break
+
+            body_lines.append(
+                body_line
+            )
+
+        body = "\n".join(
+            body_lines
+        ).strip()
+
+        if body:
+            related_excerpt_bodies.append(
+                body
+            )
+
+    # -----------------------------------------------------
+    # Normalize and validate related facts
+    # -----------------------------------------------------
+
     for item in related_raw:
+
         if not isinstance(item, dict):
             continue
 
         owner = str(
-            item.get("owner", "")
+            item.get(
+                "owner",
+                "",
+            )
             or ""
         ).strip()
 
         fact_type = str(
-            item.get("fact_type", "")
+            item.get(
+                "fact_type",
+                "",
+            )
             or ""
         ).strip()
 
         value = str(
-            item.get("value", "")
+            item.get(
+                "value",
+                "",
+            )
             or ""
         ).strip()
 
-        # A scope-sensitive related fact without an owner is
-        # unsafe and must not reach the renderer.
-        if not owner or not fact_type:
+        owner_evidence = str(
+            item.get(
+                "owner_evidence",
+                "",
+            )
+            or ""
+        ).strip()
+
+        # Owner, fact type and evidence are mandatory.
+        if (
+            not owner
+            or not fact_type
+            or not owner_evidence
+        ):
+            continue
+
+        # Metadata must never prove ownership.
+        if owner_evidence.casefold().startswith(
+            metadata_prefixes
+        ):
+            continue
+
+        evidence_normalized = (
+            normalize_related_text(
+                owner_evidence
+            )
+        )
+
+        owner_normalized = (
+            normalize_related_owner(
+                owner
+            )
+        )
+
+        if (
+            not evidence_normalized
+            or not owner_normalized
+        ):
+            continue
+
+        # Related-fact value must be supported by the exact
+        # evidence span supplied by the model. This prevents
+        # a correct owner sentence from legitimizing an
+        # unrelated or hallucinated value.
+        value_normalized = (
+            normalize_related_text(
+                value
+            )
+        )
+
+        if (
+            value_normalized
+            and value_normalized
+            not in evidence_normalized
+        ):
+            continue
+
+        validated = False
+
+        # Evidence and its owner must be supportable inside the
+        # same clean Excerpt body.
+        for body in related_excerpt_bodies:
+
+            body_normalized = (
+                normalize_related_text(
+                    body
+                )
+            )
+
+            if (
+                evidence_normalized
+                not in body_normalized
+            ):
+                continue
+
+            owner_body_normalized = (
+                normalize_related_owner(
+                    body
+                )
+            )
+
+            if (
+                owner_normalized
+                not in owner_body_normalized
+            ):
+                continue
+
+            # -------------------------------------------------
+            # Local ownership check
+            # -------------------------------------------------
+            #
+            # Do not accept an owner merely because it appears
+            # somewhere far away in a mixed-entity article.
+            # Require an owner mention reasonably close to the
+            # supplied evidence.
+            #
+
+            evidence_pos = (
+                body_normalized.find(
+                    evidence_normalized
+                )
+            )
+
+            if evidence_pos < 0:
+                continue
+
+            window_start = max(
+                0,
+                evidence_pos - 600,
+            )
+
+            window_end = min(
+                len(body_normalized),
+                evidence_pos
+                + len(evidence_normalized)
+                + 600,
+            )
+
+            local_window = (
+                body_normalized[
+                    window_start:
+                    window_end
+                ]
+            )
+
+            local_owner_window = (
+                normalize_related_owner(
+                    local_window
+                )
+            )
+
+            if (
+                owner_normalized
+                not in local_owner_window
+            ):
+                continue
+
+            validated = True
+            break
+
+        if not validated:
+            # -------------------------------------------------
+            # Related-fact local semantic fallback
+            # -------------------------------------------------
+            #
+            # The extractor can correctly identify a related
+            # fact while paraphrasing owner_evidence instead of
+            # copying CONTEXT verbatim.
+            #
+            # Accept that only if the SAME Excerpt contains:
+            #
+            # - the exact related value,
+            # - the requested owner close to that value, and
+            # - at least one strong semantic cue from the
+            #   supplied evidence close to that value.
+            #
+            # This is intentionally stricter than merely finding
+            # owner + value somewhere in a mixed-entity article.
+            #
+            evidence_words = set(
+                re.findall(
+                    r"[a-z0-9äöüß%]+",
+                    evidence_normalized,
+                )
+            )
+
+            owner_words = set(
+                owner_normalized.split()
+            )
+
+            strong_scope_words = {
+                "conversion",
+                "spread",
+                "transaction",
+                "payout",
+                "withdrawal",
+                "withdraw",
+                "rolling",
+                "monthly",
+                "daily",
+                "limit",
+                "minimum",
+                "maximum",
+                "verification",
+                "kyc",
+                "kyb",
+                "bitcoin",
+                "lightning",
+                "credit",
+            }
+
+            semantic_cues = (
+                evidence_words
+                & strong_scope_words
+            ) - owner_words
+
+            if (
+                value_normalized
+                and semantic_cues
+            ):
+                for body in related_excerpt_bodies:
+                    body_normalized = (
+                        normalize_related_text(
+                            body
+                        )
+                    )
+
+                    if (
+                        value_normalized
+                        not in body_normalized
+                    ):
+                        continue
+
+                    value_matches = list(
+                        re.finditer(
+                            re.escape(
+                                value_normalized
+                            ),
+                            body_normalized,
+                        )
+                    )
+
+                    for value_match in value_matches:
+                        value_pos = (
+                            value_match.start()
+                        )
+
+                        window_start = max(
+                            0,
+                            value_pos - 350,
+                        )
+                        window_end = min(
+                            len(body_normalized),
+                            value_pos
+                            + len(value_normalized)
+                            + 350,
+                        )
+
+                        local_window = (
+                            body_normalized[
+                                window_start:
+                                window_end
+                            ]
+                        )
+
+                        local_owner_window = (
+                            normalize_related_owner(
+                                local_window
+                            )
+                        )
+
+                        if (
+                            owner_normalized
+                            not in local_owner_window
+                        ):
+                            continue
+
+                        if not any(
+                            cue in local_window
+                            for cue in semantic_cues
+                        ):
+                            continue
+
+                        validated = True
+                        break
+
+                    if validated:
+                        break
+
+        if not validated:
             continue
 
         related_facts.append(
             {
                 "owner": owner[:200],
-                "owner_evidence": str(
+                "owner_evidence": (
+                    owner_evidence[:1000]
+                ),
+                "scope": str(
                     item.get(
-                        "owner_evidence",
+                        "scope",
                         "",
                     )
-                    or ""
-                ).strip()[:1000],
-                "scope": str(
-                    item.get("scope", "")
                     or ""
                 ).strip()[:300],
                 "fact_type": fact_type[:200],
                 "value": value[:300],
                 "condition": str(
-                    item.get("condition", "")
+                    item.get(
+                        "condition",
+                        "",
+                    )
                     or ""
                 ).strip()[:500],
             }
@@ -5982,6 +6867,25 @@ Return only the required JSON object.
             or ""
         ).strip()[:500],
     }
+
+    # -----------------------------------------------------
+    # Atomic requested-fact override
+    # -----------------------------------------------------
+    #
+    # The model extracts value, condition, owner and evidence.
+    # The requested entity/fact themselves are deterministic.
+    # Existing validation below still decides whether the
+    # extracted evidence actually supports them.
+    #
+    if requested_entity_override:
+        normalized["requested_entity"] = (
+            requested_entity_override.strip()[:200]
+        )
+
+    if requested_fact_override:
+        normalized["requested_fact"] = (
+            requested_fact_override.strip()[:300]
+        )
 
     # -----------------------------------------------------
     # Deterministic entity ownership validation
@@ -6521,6 +7425,117 @@ Return only the required JSON object.
         )
 
         # -------------------------------------------------
+        # Compound payout-limit scope validation
+        # -------------------------------------------------
+        #
+        # Some payout-limit facts are expressed across adjacent
+        # sentences inside the SAME Excerpt. Example:
+        #
+        #   "DFX applies a rolling 30-day limit ..."
+        #   "Funds above the limit will not be paid out ..."
+        #
+        # The copied evidence must still explicitly support the
+        # limit itself. Only the payout qualifier may be resolved
+        # from a small local window in that same Excerpt.
+        #
+        if (
+            not fact_scope_supported
+            and evidence_in_excerpt_body
+        ):
+            requested_fact_for_scope = (
+                normalize_evidence_text(
+                    str(
+                        normalized.get(
+                            "requested_fact",
+                            "",
+                        )
+                        or ""
+                    )
+                )
+            )
+
+            is_payout_limit_fact = (
+                contains_any(
+                    requested_fact_for_scope,
+                    [
+                        "payout",
+                        "withdraw",
+                        "auszahl",
+                        "abheb",
+                    ],
+                )
+                and contains_any(
+                    requested_fact_for_scope,
+                    [
+                        "limit",
+                        "maximum",
+                        "maximal",
+                    ],
+                )
+            )
+
+            evidence_has_limit = (
+                contains_any(
+                    evidence_normalized,
+                    [
+                        "limit",
+                        "up to",
+                        "maximum",
+                        "bis zu",
+                        "maximal",
+                    ],
+                )
+            )
+
+            if (
+                is_payout_limit_fact
+                and evidence_has_limit
+            ):
+                evidence_pos = (
+                    fact_excerpt_body_normalized.find(
+                        evidence_normalized
+                    )
+                )
+
+                if evidence_pos >= 0:
+                    window_start = max(
+                        0,
+                        evidence_pos - 600,
+                    )
+                    window_end = min(
+                        len(
+                            fact_excerpt_body_normalized
+                        ),
+                        evidence_pos
+                        + len(evidence_normalized)
+                        + 600,
+                    )
+
+                    local_scope_window = (
+                        fact_excerpt_body_normalized[
+                            window_start:window_end
+                        ]
+                    )
+
+                    local_has_payout_scope = (
+                        contains_any(
+                            local_scope_window,
+                            [
+                                "payout",
+                                "paid out",
+                                "withdraw",
+                                "auszahl",
+                                "abheb",
+                                "bank account",
+                                "bankkonto",
+                            ],
+                        )
+                    )
+
+                    if local_has_payout_scope:
+                        fact_scope_supported = True
+
+        # -------------------------------------------------
         # Validate model-provided owner evidence
         # -------------------------------------------------
 
@@ -6628,6 +7643,94 @@ Return only the required JSON object.
             ] = resolved_owner_evidence
 
         # -------------------------------------------------
+        # Deterministic same-Excerpt fee qualifier stabilization
+        # -------------------------------------------------
+        #
+        # The extractor may inconsistently omit an explicitly
+        # stated "No monthly fee" qualifier from
+        # requested_fact_condition.
+        #
+        # Add it only when:
+        # - this is a fee fact,
+        # - the primary fact evidence was found in a real
+        #   Excerpt body,
+        # - ownership was resolved, and
+        # - that SAME Excerpt explicitly states "No monthly fee".
+        #
+        requested_fact_for_qualifiers = (
+            normalize_evidence_text(
+                str(
+                    normalized.get(
+                        "requested_fact",
+                        "",
+                    )
+                    or ""
+                )
+            )
+        )
+
+        is_fee_fact = contains_any(
+            requested_fact_for_qualifiers,
+            [
+                "fee",
+                "fees",
+                "gebühr",
+                "gebuehr",
+                "kosten",
+            ],
+        )
+
+        if (
+            normalized.get(
+                "requested_fact_status"
+            )
+            == "specified"
+            and is_fee_fact
+            and fact_scope_supported
+            and evidence_in_excerpt_body
+            and owner_evidence_resolved
+            and "no monthly fee"
+            in fact_excerpt_body_normalized
+        ):
+            condition = str(
+                normalized.get(
+                    "requested_fact_condition",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            condition_normalized = (
+                normalize_evidence_text(
+                    condition
+                )
+            )
+
+            if (
+                "no monthly fee"
+                not in condition_normalized
+            ):
+                condition = condition.rstrip(
+                    " ."
+                )
+
+                if condition:
+                    condition += ". "
+
+                # Keep this deterministic augmentation English-only
+                # for now; other languages retain extractor output.
+                if (
+                    (lang or "")
+                    .lower()
+                    .startswith("en")
+                ):
+                    condition += "No monthly fee."
+
+                normalized[
+                    "requested_fact_condition"
+                ] = condition[:500]
+
+        # -------------------------------------------------
         # Final requested-fact acceptance
         # -------------------------------------------------
 
@@ -6666,9 +7769,346 @@ Return only the required JSON object.
 
 
 
+
+def _resolve_compound_scope_entity(
+    facts: Dict[str, Any],
+) -> str:
+    """
+    Resolve the canonical owner used for atomic compound facts.
+
+    Prefer an already validated requested_fact_owner.
+
+    If strict validation rejected a composite requested_entity
+    such as "Coinsnap for WooCommerce", allow recovery only when
+    the validated related facts identify exactly one distinct
+    owner for the same requested fact family.
+
+    Otherwise preserve the original requested_entity.
+    """
+    if not isinstance(facts, dict):
+        return ""
+
+    requested_owner = str(
+        facts.get(
+            "requested_fact_owner",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if requested_owner:
+        return requested_owner
+
+    requested_fact = str(
+        facts.get(
+            "requested_fact",
+            "",
+        )
+        or ""
+    ).strip()
+
+    requested_family = (
+        _scope_fact_family(
+            requested_fact
+        )
+    )
+
+    owners = []
+
+    for item in (
+        facts.get(
+            "related_facts",
+            [],
+        )
+        or []
+    ):
+        if not isinstance(item, dict):
+            continue
+
+        owner = str(
+            item.get(
+                "owner",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if not owner:
+            continue
+
+        fact_type = str(
+            item.get(
+                "fact_type",
+                "",
+            )
+            or ""
+        ).strip()
+
+        scope = str(
+            item.get(
+                "scope",
+                "",
+            )
+            or ""
+        ).strip()
+
+        related_family = (
+            _scope_fact_family(
+                fact_type
+                or scope
+            )
+        )
+
+        if (
+            requested_family
+            and related_family
+            and requested_family
+            != related_family
+        ):
+            continue
+
+        if not any(
+            owner.casefold()
+            == existing.casefold()
+            for existing in owners
+        ):
+            owners.append(owner)
+
+    if len(owners) == 1:
+        return owners[0]
+
+    return str(
+        facts.get(
+            "requested_entity",
+            "",
+        )
+        or ""
+    ).strip()
+
+
+def _split_scope_facts_from_message(
+    message: str,
+) -> List[str]:
+    """
+    Detect known scope-sensitive fact families directly from the
+    user's question.
+
+    This deliberately does not depend on the scope extractor,
+    because the legacy extractor has only one requested_fact
+    field and may collapse compound questions to the first fact.
+    """
+    value = " ".join(
+        str(message or "").casefold().split()
+    )
+
+    if not value:
+        return []
+
+    detected = []
+
+    # Keep the order in which the user asks for the facts.
+    candidates = []
+
+    patterns = [
+        (
+            "fees",
+            [
+                r"\bfees?\b",
+                r"\bgebühren?\b",
+                r"\bgebuehren?\b",
+                r"\bkosten\b",
+            ],
+        ),
+        (
+            "payout limits",
+            [
+                r"\bpayout\s+limits?\b",
+                r"\bwithdrawal\s+limits?\b",
+                r"\bwithdraw\s+limits?\b",
+                r"\bauszahlungs?limits?\b",
+                r"\bauszahlungslimits?\b",
+                r"\babhebungslimits?\b",
+            ],
+        ),
+        (
+            "KYC requirements",
+            [
+                r"\bkyc\b",
+                r"\bkyb\b",
+                r"\bverification\s+requirements?\b",
+                r"\bverifizierungsanforderungen?\b",
+            ],
+        ),
+        (
+            "minimum amount",
+            [
+                r"\bminimum\s+amount\b",
+                r"\bminimum\b",
+                r"\bmindestbetrag\b",
+            ],
+        ),
+        (
+            "maximum amount",
+            [
+                r"\bmaximum\s+amount\b",
+                r"\bmaximum\b",
+                r"\bmaximalbetrag\b",
+            ],
+        ),
+    ]
+
+    for canonical, regexes in patterns:
+        positions = []
+
+        for regex in regexes:
+            match = re.search(
+                regex,
+                value,
+                flags=re.IGNORECASE,
+            )
+
+            if match:
+                positions.append(
+                    match.start()
+                )
+
+        if positions:
+            candidates.append(
+                (
+                    min(positions),
+                    canonical,
+                )
+            )
+
+    candidates.sort(
+        key=lambda item: item[0]
+    )
+
+    seen = set()
+
+    for _, canonical in candidates:
+        key = canonical.casefold()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        detected.append(
+            canonical
+        )
+
+    return detected[:6]
+
+
+def _split_scope_requested_facts(
+    facts: Dict[str, Any],
+) -> List[str]:
+    """
+    Split a compound requested_fact into atomic requested facts.
+
+    Deliberately do NOT split on "/" because expressions such as
+    KYC/KYB are normally one semantic concept rather than two
+    separate user questions.
+    """
+    if not isinstance(facts, dict):
+        return []
+
+    requested_fact = str(
+        facts.get(
+            "requested_fact",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not requested_fact:
+        return []
+
+    parts = re.split(
+        r"\s*(?:[,;&+]|\b(?:and|or|und|oder)\b)\s*",
+        requested_fact,
+        flags=re.IGNORECASE,
+    )
+
+    output = []
+    seen = set()
+
+    for part in parts:
+        value = re.sub(
+            r"\s+",
+            " ",
+            (part or "").strip(
+                " .,:;"
+            ),
+        ).strip()
+
+        if not value:
+            continue
+
+        key = value.casefold()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        output.append(value)
+
+    return output[:6]
+
+
+def _scope_facts_have_compound_request(
+    facts: Dict[str, Any],
+) -> bool:
+    """
+    Return True only when the extractor's legacy requested_fact
+    field contains at least two atomic requested facts.
+    """
+    return len(
+        _split_scope_requested_facts(
+            facts
+        )
+    ) > 1
+
+
+def _scope_owner_explicitly_excluded(
+    message: str,
+    owner: str,
+) -> bool:
+    """
+    Return True only when the user explicitly excludes this
+    owner, e.g. "excluding DFX", "without DFX", or "ohne DFX".
+    """
+    message_text = " ".join(
+        str(message or "").casefold().split()
+    )
+    owner_text = " ".join(
+        str(owner or "").casefold().split()
+    )
+
+    if not message_text or not owner_text:
+        return False
+
+    escaped_owner = re.escape(owner_text)
+
+    patterns = [
+        rf"\bexcluding\s+{escaped_owner}(?:\b|$)",
+        rf"\bwithout\s+{escaped_owner}(?:\b|$)",
+        rf"\bexcept\s+{escaped_owner}(?:\b|$)",
+        rf"\bohne\s+{escaped_owner}(?:\b|$)",
+        rf"\baußer\s+{escaped_owner}(?:\b|$)",
+        rf"\bausser\s+{escaped_owner}(?:\b|$)",
+    ]
+
+    return any(
+        re.search(pattern, message_text)
+        for pattern in patterns
+    )
+
+
 def _render_scope_answer(
     facts: Dict[str, Any],
     lang: str,
+    message: str = "",
 ) -> str:
     """
     Deterministically render already-normalized scope facts.
@@ -6773,8 +8213,7 @@ def _render_scope_answer(
             return ""
 
         # The extractor's deterministic owner validation should
-        # already guarantee this relationship. Keep the renderer
-        # conservative if malformed data nevertheless arrives.
+        # already guarantee this relationship.
         if (
             requested_owner
             and requested_owner.casefold()
@@ -6782,36 +8221,38 @@ def _render_scope_answer(
         ):
             return ""
 
+        clean_value = requested_value.rstrip(
+            " .!?\n\t"
+        ) + "."
+
         if is_de:
             paragraphs.append(
-                f"Für {requested_entity} ist "
-                f"{requested_fact} mit "
-                f"{requested_value} angegeben."
+                f"Für {requested_entity} gilt für "
+                f"{requested_fact}: {clean_value}"
             )
-
-            if requested_condition:
-                paragraphs.append(
-                    "Zusätzlich gilt: "
-                    + requested_condition.rstrip(
-                        "."
-                    )
-                    + "."
-                )
-
         else:
             paragraphs.append(
                 f"For {requested_entity}, "
-                f"{requested_fact} is specified as "
-                f"{requested_value}."
+                f"{requested_fact}: {clean_value}"
             )
 
-            if requested_condition:
+        if requested_condition:
+            clean_condition = (
+                requested_condition.rstrip(
+                    " .!?\n\t"
+                )
+                + "."
+            )
+
+            if is_de:
+                paragraphs.append(
+                    "Zusätzlich gilt: "
+                    + clean_condition
+                )
+            else:
                 paragraphs.append(
                     "Additionally: "
-                    + requested_condition.rstrip(
-                        "."
-                    )
-                    + "."
+                    + clean_condition
                 )
 
     elif requested_status == "not_specified":
@@ -6891,6 +8332,17 @@ def _render_scope_answer(
         if not owner or not fact_type:
             continue
 
+        if _scope_owner_explicitly_excluded(
+            message,
+            owner,
+        ):
+            continue
+
+        # Do not render label-only fragments such as
+        # "For DFX, the related KYC process."
+        if not value and not condition:
+            continue
+
         key = (
             owner.casefold(),
             fact_type.casefold(),
@@ -6903,65 +8355,43 @@ def _render_scope_answer(
 
         seen_related.add(key)
 
+        clean_value = (
+            value.rstrip(" .!?\n\t") + "."
+            if value
+            else ""
+        )
+
+        clean_condition = ""
+        if condition:
+            condition_text = (
+                condition.rstrip(" .!?\n\t")
+            )
+            if condition_text:
+                clean_condition = (
+                    condition_text[0].upper()
+                    + condition_text[1:]
+                    + "."
+                )
+
         if is_de:
             sentence = (
-                f"Bei {owner} gilt dagegen: "
-                f"{fact_type}"
+                f"Bei {owner} gilt für "
+                f"{fact_type}:"
             )
-
-            if value:
-                sentence += (
-                    f": {value}"
-                )
-
-            sentence += "."
-
-            if condition:
-                clean_condition = (
-                    condition[0].upper()
-                    + condition[1:]
-                    if len(condition) > 1
-                    else condition.upper()
-                )
-
-                sentence += (
-                    f" {clean_condition}"
-                )
-
-                if not sentence.endswith(
-                    (".", "!", "?")
-                ):
-                    sentence += "."
-
         else:
             sentence = (
-                f"For {owner}, the related "
-                f"{fact_type}"
+                f"For {owner}, {fact_type}:"
             )
 
-            if value:
-                sentence += (
-                    f" is {value}"
-                )
+        if clean_value:
+            sentence += (
+                " " + clean_value
+            )
 
-            sentence += "."
-
-            if condition:
-                clean_condition = (
-                    condition[0].upper()
-                    + condition[1:]
-                    if len(condition) > 1
-                    else condition.upper()
-                )
-
-                sentence += (
-                    f" {clean_condition}"
-                )
-
-                if not sentence.endswith(
-                    (".", "!", "?")
-                ):
-                    sentence += "."
+        if clean_condition:
+            sentence += (
+                " " + clean_condition
+            )
 
         paragraphs.append(
             sentence
@@ -6977,10 +8407,7 @@ def _render_scope_answer(
                 config_fact
             )
 
-    elif config_status in {
-        "not_specified",
-        "not_applicable",
-    }:
+    elif config_status == "not_specified":
         if is_de:
             paragraphs.append(
                 "Eine entsprechende Änderung im Dashboard "
@@ -7013,6 +8440,640 @@ def _render_scope_answer(
     )
 
 
+
+
+def _scope_fact_family(
+    value: str,
+) -> str:
+    """
+    Map a scope-sensitive fact label to a broad family.
+
+    Used only to keep related facts relevant when multiple
+    independently validated atomic facts are combined.
+    """
+    value = str(
+        value or ""
+    ).casefold()
+
+    if any(
+        token in value
+        for token in (
+            "fee",
+            "fees",
+            "gebühr",
+            "gebuehr",
+            "kosten",
+            "spread",
+        )
+    ):
+        return "fees"
+
+    if any(
+        token in value
+        for token in (
+            "limit",
+            "maximum",
+            "minimum",
+            "threshold",
+            "maximal",
+            "mindest",
+        )
+    ):
+        return "limits"
+
+    if any(
+        token in value
+        for token in (
+            "kyc",
+            "kyb",
+            "verification",
+            "verifizierung",
+        )
+    ):
+        return "kyc"
+
+    return ""
+
+
+def _scope_compound_display_fact_type(
+    fact_type: str,
+    evidence: str,
+) -> str:
+    """
+    Improve labels only from already validated evidence.
+    No ownership or factual inference happens here.
+    """
+    current = str(
+        fact_type or ""
+    ).strip()
+
+    evidence_text = str(
+        evidence or ""
+    ).casefold()
+
+    if _scope_fact_family(
+        current
+    ) != "fees":
+        return current
+
+    if "conversion spread" in evidence_text:
+        return "conversion spread"
+
+    # Check the more specific merchant/provider fee wording
+    # before "bank payout fee". Some validated evidence spans
+    # mention both Coinsnap and DFX fees in the same sentence.
+    if "transaction fee" in evidence_text:
+        return "transaction fee"
+
+    if "bank payout fee" in evidence_text:
+        return "bank payout fee"
+
+    if "withdrawal fee" in evidence_text:
+        return "withdrawal fee"
+
+    return current
+
+
+def _scope_numeric_tokens(
+    value: str,
+):
+    """
+    Extract normalized numeric tokens for conservative duplicate
+    detection between already validated facts.
+    """
+    value = str(
+        value or ""
+    ).replace(",", "")
+
+    return set(
+        re.findall(
+            r"\b\d+(?:\.\d+)?\b",
+            value,
+        )
+    )
+
+
+def _stabilize_compound_limit_fact(
+    facts: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Stabilize display-only limit qualifiers from already
+    validated requested_fact_evidence.
+
+    No new fact or ownership is inferred here.
+    """
+    output = dict(
+        facts or {}
+    )
+
+    requested_fact = str(
+        output.get(
+            "requested_fact",
+            "",
+        )
+        or ""
+    )
+
+    if _scope_fact_family(
+        requested_fact
+    ) != "limits":
+        return output
+
+    value = str(
+        output.get(
+            "requested_fact_value",
+            "",
+        )
+        or ""
+    ).strip()
+
+    evidence = str(
+        output.get(
+            "requested_fact_evidence",
+            "",
+        )
+        or ""
+    ).strip()
+
+    evidence_lower = (
+        evidence.casefold()
+    )
+
+    # Preserve rolling time windows that define the limit itself.
+    rolling_match = re.search(
+        r"\brolling\s+(\d+)[-\s]day\b",
+        evidence_lower,
+    )
+
+    if (
+        rolling_match
+        and "rolling" not in value.casefold()
+    ):
+        days = rolling_match.group(1)
+
+        value = (
+            value.rstrip(" .")
+            + f" within a rolling {days}-day period"
+        )
+
+        output[
+            "requested_fact_value"
+        ] = value
+
+    requested_numbers = (
+        _scope_numeric_tokens(
+            value
+        )
+    )
+
+    requested_owner = str(
+        output.get(
+            "requested_fact_owner",
+            "",
+        )
+        or output.get(
+            "requested_entity",
+            "",
+        )
+        or ""
+    ).strip().casefold()
+
+    filtered_related = []
+
+    for item in (
+        output.get(
+            "related_facts",
+            [],
+        )
+        or []
+    ):
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        related_family = (
+            _scope_fact_family(
+                str(
+                    item.get(
+                        "fact_type",
+                        "",
+                    )
+                    or item.get(
+                        "scope",
+                        "",
+                    )
+                    or ""
+                )
+            )
+        )
+
+        related_owner = str(
+            item.get(
+                "owner",
+                "",
+            )
+            or ""
+        ).strip().casefold()
+
+        related_value = str(
+            item.get(
+                "value",
+                "",
+            )
+            or ""
+        )
+
+        related_numbers = (
+            _scope_numeric_tokens(
+                related_value
+            )
+        )
+
+        # A same-owner related limit using the same threshold is
+        # normally a duplicate/alternate wording of the primary
+        # validated limit, not a second independent limit.
+        if (
+            related_family == "limits"
+            and related_owner
+            == requested_owner
+            and requested_numbers
+            and related_numbers
+            and not requested_numbers.isdisjoint(
+                related_numbers
+            )
+        ):
+            continue
+
+        filtered_related.append(
+            item
+        )
+
+    output[
+        "related_facts"
+    ] = filtered_related
+
+    return output
+
+
+def _scope_redundancy_tokens(
+    value: str,
+):
+    """
+    Normalize content words for conservative duplicate detection
+    inside already validated structured facts.
+    """
+    tokens = re.findall(
+        r"[a-z0-9äöüß]+",
+        str(value or "").casefold(),
+    )
+
+    stop_words = {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "to",
+        "for",
+        "of",
+        "in",
+        "on",
+        "with",
+        "their",
+        "own",
+        "this",
+        "that",
+        "is",
+        "are",
+        "be",
+        "may",
+        "can",
+        "also",
+        "per",
+    }
+
+    normalized = set()
+
+    for token in tokens:
+        if token in stop_words:
+            continue
+
+        replacements = {
+            "requirements": "require",
+            "requirement": "require",
+            "requires": "require",
+            "required": "require",
+            "partners": "service",
+            "partner": "service",
+            "services": "service",
+            "payouts": "payout",
+            "fees": "fee",
+        }
+
+        normalized.add(
+            replacements.get(
+                token,
+                token,
+            )
+        )
+
+    return normalized
+
+
+def _scope_texts_semantically_redundant(
+    first: str,
+    second: str,
+) -> bool:
+    """
+    Conservative token-overlap test used only to suppress
+    duplicate presentation of already validated facts.
+    """
+    first_tokens = (
+        _scope_redundancy_tokens(
+            first
+        )
+    )
+
+    second_tokens = (
+        _scope_redundancy_tokens(
+            second
+        )
+    )
+
+    if (
+        len(first_tokens) < 3
+        or len(second_tokens) < 3
+    ):
+        return False
+
+    overlap = (
+        first_tokens
+        & second_tokens
+    )
+
+    return (
+        len(overlap) >= 3
+        and (
+            len(overlap)
+            / min(
+                len(first_tokens),
+                len(second_tokens),
+            )
+        ) >= 0.5
+    )
+
+
+def _render_compound_scope_answer(
+    fact_sets: List[Dict[str, Any]],
+    lang: str,
+    message: str,
+) -> str:
+    """
+    Render multiple independently validated atomic scope facts.
+
+    Each atomic fact still uses the existing deterministic
+    _render_scope_answer() implementation.
+
+    Related facts are restricted to the same fact family so,
+    for example, a payout limit is not repeated inside the KYC
+    part of a compound answer.
+    """
+    paragraphs = []
+    seen = set()
+
+    for facts in fact_sets:
+        if not isinstance(
+            facts,
+            dict,
+        ):
+            continue
+
+        local_facts = dict(facts)
+
+        local_facts = (
+            _stabilize_compound_limit_fact(
+                local_facts
+            )
+        )
+
+        requested_fact = str(
+            local_facts.get(
+                "requested_fact",
+                "",
+            )
+            or ""
+        ).strip()
+
+        requested_family = (
+            _scope_fact_family(
+                requested_fact
+            )
+        )
+
+        if requested_family == "fees":
+            local_facts["requested_fact"] = (
+                _scope_compound_display_fact_type(
+                    requested_fact,
+                    str(
+                        local_facts.get(
+                            "requested_fact_evidence",
+                            "",
+                        )
+                        or ""
+                    ),
+                )
+            )
+
+        filtered_related = []
+
+        for item in (
+            local_facts.get(
+                "related_facts",
+                [],
+            )
+            or []
+        ):
+            if not isinstance(
+                item,
+                dict,
+            ):
+                continue
+
+            fact_type = str(
+                item.get(
+                    "fact_type",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            scope = str(
+                item.get(
+                    "scope",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            related_family = (
+                _scope_fact_family(
+                    fact_type
+                    or scope
+                )
+            )
+
+            if (
+                requested_family
+                and related_family
+                != requested_family
+            ):
+                continue
+
+            clean_item = dict(item)
+
+            owner = str(
+                clean_item.get(
+                    "owner",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            value = str(
+                clean_item.get(
+                    "value",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            requested_owner = str(
+                local_facts.get(
+                    "requested_fact_owner",
+                    "",
+                )
+                or local_facts.get(
+                    "requested_entity",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            requested_condition = str(
+                local_facts.get(
+                    "requested_fact_condition",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            related_condition = str(
+                clean_item.get(
+                    "condition",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            related_text = " ".join(
+                value
+                for value in (
+                    value,
+                    related_condition,
+                )
+                if value
+            )
+
+            # Avoid rendering the same already validated
+            # condition again as a same-owner related fact.
+            if (
+                requested_condition
+                and related_text
+                and owner.casefold()
+                == requested_owner.casefold()
+                and requested_family
+                == related_family
+                and _scope_texts_semantically_redundant(
+                    requested_condition,
+                    related_text,
+                )
+            ):
+                continue
+
+            # A non-numeric same-owner "limit" related fact is
+            # normally a condition of the primary limit rather
+            # than a second independent limit.
+            if (
+                requested_family == "limits"
+                and related_family == "limits"
+                and owner.casefold()
+                == requested_owner.casefold()
+                and value
+                and not re.search(
+                    r"\d",
+                    value,
+                )
+            ):
+                continue
+
+            if related_family == "fees":
+                clean_item["fact_type"] = (
+                    _scope_compound_display_fact_type(
+                        fact_type,
+                        str(
+                            clean_item.get(
+                                "owner_evidence",
+                                "",
+                            )
+                            or ""
+                        ),
+                    )
+                )
+
+            filtered_related.append(
+                clean_item
+            )
+
+        local_facts[
+            "related_facts"
+        ] = filtered_related
+
+        rendered = _render_scope_answer(
+            facts=local_facts,
+            lang=lang,
+            message=message,
+        )
+
+        if not rendered:
+            return ""
+
+        for paragraph in rendered.split(
+            "\n\n"
+        ):
+            paragraph = paragraph.strip()
+
+            if not paragraph:
+                continue
+
+            key = re.sub(
+                r"\s+",
+                " ",
+                paragraph,
+            ).casefold()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            paragraphs.append(
+                paragraph
+            )
+
+    return "\n\n".join(
+        paragraphs
+    )
 
 
 def _filter_scope_suggestions(
@@ -7418,14 +9479,150 @@ def generate_grounded_answer_and_suggestions(
             lang=lang,
         )
 
+        # -------------------------------------------------
+        # Compound structured scope path
+        # -------------------------------------------------
+        #
+        # Detect multiple requested fact families directly from
+        # the original user message. The legacy extractor has a
+        # single requested_fact field and may otherwise collapse
+        # a multi-fact question to only the first requested fact.
+        #
+        message_scope_facts = (
+            _split_scope_facts_from_message(
+                message
+            )
+        )
+
         if (
             not scope_fact_extraction_error
             and scope_facts
+            and len(message_scope_facts) >= 2
+        ):
+            compound_entity = (
+                _resolve_compound_scope_entity(
+                    scope_facts
+                )
+            )
+
+            compound_fact_sets = []
+            compound_error = None
+
+            if not compound_entity:
+                compound_error = (
+                    "missing_compound_requested_entity"
+                )
+            else:
+                for index, atomic_fact in enumerate(
+                    message_scope_facts,
+                    start=1,
+                ):
+                    (
+                        atomic_facts,
+                        atomic_error,
+                    ) = _extract_scope_facts(
+                        message=message,
+                        context=context,
+                        session_id=(
+                            f"{session_id or 'scope'}"
+                            f"-compound-{index}"
+                        ),
+                        lang=lang,
+                        requested_entity_override=(
+                            compound_entity
+                        ),
+                        requested_fact_override=(
+                            atomic_fact
+                        ),
+                    )
+
+                    if (
+                        atomic_error
+                        or not atomic_facts
+                    ):
+                        compound_error = (
+                            atomic_error
+                            or (
+                                "empty_atomic_scope_facts:"
+                                + atomic_fact
+                            )
+                        )
+                        break
+
+                    compound_fact_sets.append(
+                        atomic_facts
+                    )
+
+            if (
+                not compound_error
+                and len(compound_fact_sets)
+                == len(message_scope_facts)
+            ):
+                compound_reply = (
+                    _render_compound_scope_answer(
+                        fact_sets=compound_fact_sets,
+                        lang=lang,
+                        message=message,
+                    )
+                )
+
+                if compound_reply:
+                    reply = compound_reply
+
+                    # Keep the first production rollout
+                    # conservative. The normal generation may
+                    # have produced follow-up questions before
+                    # structured correction, but those questions
+                    # have not been atomically scope-validated.
+                    suggestions = []
+
+                    scope_structured_used = True
+
+                    return (
+                        reply,
+                        suggestions,
+                        {
+                            "generation_error": None,
+                            "repair_attempted": True,
+                            "repair_success": True,
+                            "technical_grounding_issues": [],
+                            "scope_audit_attempted": False,
+                            "scope_audit_error": None,
+                            "scope_grounding_issues": [],
+                            "scope_repair_success": True,
+                            "scope_structured_used": True,
+                            "scope_compound_structured_used": True,
+                            "scope_atomic_fact_count": len(
+                                compound_fact_sets
+                            ),
+                            "scope_fact_extraction_error": None,
+                            "combined_generation": True,
+                        },
+                    )
+
+                compound_error = (
+                    "compound_scope_render_empty"
+                )
+
+            if compound_error:
+                scope_fact_extraction_error = (
+                    "compound_scope:"
+                    + str(compound_error)
+                )
+
+        if (
+            not scope_fact_extraction_error
+            and scope_facts
+            and len(message_scope_facts) <= 1
+            and not _scope_facts_have_compound_request(
+                scope_facts
+            )
         ):
             structured_reply = (
                 _render_scope_answer(
                     facts=scope_facts,
                     lang=lang,
+                    message=message,
                 )
             )
 
@@ -7948,6 +10145,8 @@ def _detect_answer_status(
         "not specified in the available context",
         "not specified in the context",
         "not supported by the context",
+        "the provided context does not specify",
+        "the supplied context does not specify",
         "cannot provide",
         "could not find sufficiently clear information",
         "finde ich in unseren knowledge bases keine eindeutigen informationen",
@@ -7955,7 +10154,6 @@ def _detect_answer_status(
         "nicht im kontext angegeben",
         "je ne trouve pas d'informations suffisamment claires",
     ]
-
     if any(
         phrase in text
         for phrase in unsupported_phrases
@@ -8334,6 +10532,16 @@ async def chat(
         guardrail,
     )
 
+    # Deterministic fallback for unsupported answers.
+    # Do not return speculative additions after the model has
+    # already acknowledged that the requested fact is not supported.
+    if answer_status == "unsupported":
+        reply = _no_context_message(
+            lang
+        )
+        suggestions = []
+        sources = []
+
     question_analytics.log_question(
         question=message,
         site=site,
@@ -8394,6 +10602,16 @@ async def chat(
             "scope_fact_extraction_error": (
                 generation_meta.get(
                     "scope_fact_extraction_error"
+                )
+            ),
+            "scope_compound_structured_used": (
+                generation_meta.get(
+                    "scope_compound_structured_used"
+                )
+            ),
+            "scope_atomic_fact_count": (
+                generation_meta.get(
+                    "scope_atomic_fact_count"
                 )
             ),
             "scope_audit_attempted": (
