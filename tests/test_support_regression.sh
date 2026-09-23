@@ -60,6 +60,27 @@ if echo "$R" | jq -e '
     and (.reply | contains("bank payout fee: 0.2%"))
     and (.reply | contains("transaction fee: 1%"))
     and (.reply | contains("conversion spread: 1%"))
+
+    # The prepaid Coinsnap credit qualifier must belong to the
+    # Coinsnap transaction fee, never to the DFX payout fee.
+    and (
+        .reply
+        | test(
+            "For Coinsnap, transaction fee: 1%\\.[\\s\\S]{0,140}prepaid Coinsnap credit";
+            "i"
+        )
+    )
+    and (
+        (
+            .reply
+            | test(
+                "For DFX, bank payout fee: 0\\.2%\\.\\s*\\n\\s*\\n\\s*Additionally:[^\\n]*prepaid Coinsnap credit";
+                "i"
+            )
+        )
+        | not
+    )
+
     and (.reply | contains("CHF 1,000"))
     and (.reply | contains("rolling 30-day"))
     and (.reply | contains("KYC verification is mandatory"))

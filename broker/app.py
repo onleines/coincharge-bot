@@ -2381,6 +2381,74 @@ def _select_top_chunks(
     )
 
 
+def _ensure_current_page_selection(
+    selected: List[Dict[str, Any]],
+    current_page_results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Guarantee that the small set of already query-ranked
+    current-page chunks survives final TOP_K selection.
+
+    Current-page retrieval is capped separately, so this cannot
+    fill the whole context with one page.
+    """
+    if not current_page_results:
+        return selected
+
+    merged: List[
+        Dict[str, Any]
+    ] = []
+
+    seen = set()
+
+    def add(
+        item: Dict[str, Any],
+    ) -> None:
+        if len(merged) >= TOP_K:
+            return
+
+        collection = str(
+            item.get(
+                "collection",
+                "",
+            )
+        )
+
+        point_id = str(
+            item.get(
+                "id",
+                "",
+            )
+        )
+
+        key = (
+            collection,
+            point_id,
+        )
+
+        if (
+            point_id
+            and key in seen
+        ):
+            return
+
+        if point_id:
+            seen.add(key)
+
+        merged.append(item)
+
+    # Current page first: at most the small capped number
+    # returned by _retrieve_current_page_hits().
+    for item in current_page_results:
+        add(item)
+
+    # Preserve the remainder of normal ranked selection.
+    for item in selected:
+        add(item)
+
+    return merged[:TOP_K]
+
+
 # -----------------------------------------------------------------------------
 # Group by URL
 # -----------------------------------------------------------------------------
@@ -2458,6 +2526,7 @@ def _group_results_by_url(
                 "best_rrf_score": 0.0,
                 "best_scope_score": 0.0,
                 "hits": [],
+                "has_current_page_hit": False,
                 "doc_type": (
                     result.get(
                         "doc_type"
@@ -2489,6 +2558,14 @@ def _group_results_by_url(
         group = grouped[
             group_key
         ]
+
+        if (
+            result.get("mode")
+            == "current_page"
+        ):
+            group[
+                "has_current_page_hit"
+            ] = True
 
         group["hits"].append(
             result
@@ -2634,10 +2711,30 @@ def _group_results_by_url(
             reverse=True,
         )
 
-        selected_hits = (
-            group["hits"]
-            [:MAX_CHUNKS_PER_URL]
-        )
+        current_page_group_hits = [
+            hit
+            for hit in group["hits"]
+            if hit.get("mode")
+            == "current_page"
+        ]
+
+        other_group_hits = [
+            hit
+            for hit in group["hits"]
+            if hit.get("mode")
+            != "current_page"
+        ]
+
+        if current_page_group_hits:
+            selected_hits = (
+                current_page_group_hits
+                + other_group_hits
+            )[:MAX_CHUNKS_PER_URL]
+        else:
+            selected_hits = (
+                group["hits"]
+                [:MAX_CHUNKS_PER_URL]
+            )
 
         selected_hits.sort(
             key=lambda hit: int(
@@ -2662,9 +2759,36 @@ def _group_results_by_url(
         reverse=True,
     )
 
-    if not strong:
+    current_page_group = next(
+        (
+            group
+            for group in groups
+            if group.get(
+                "has_current_page_hit"
+            )
+        ),
+        None,
+    )
 
-        return groups[
+    if not strong:
+        final_groups = groups[
+            :GROUPED_TOP_URLS
+        ]
+
+        if (
+            current_page_group is not None
+            and current_page_group
+            not in final_groups
+            and GROUPED_TOP_URLS > 0
+        ):
+            final_groups = (
+                [current_page_group]
+                + final_groups[
+                    :GROUPED_TOP_URLS - 1
+                ]
+            )
+
+        return final_groups[
             :GROUPED_TOP_URLS
         ]
 
@@ -2722,9 +2846,23 @@ def _group_results_by_url(
                 url
             )
 
+    if (
+        current_page_group is not None
+        and current_page_group
+        not in final_groups
+        and GROUPED_TOP_URLS > 0
+    ):
+        final_groups = (
+            [current_page_group]
+            + final_groups[
+                :GROUPED_TOP_URLS - 1
+            ]
+        )
+
     return final_groups[
         :GROUPED_TOP_URLS
     ]
+
 
 def _expand_structured_howto_top_group(
     groups: List[Dict[str, Any]],
@@ -3338,12 +3476,245 @@ def _build_scope_retrieval_query(
 
 
 
+def _current_page_url_candidates(
+    page_url: Optional[str],
+    site: str,
+    page_path: Optional[str],
+) -> List[str]:
+    """
+    Build conservative exact-URL candidates for current-page
+    retrieval.
+
+    Query strings and fragments are ignored because indexed
+    canonical article URLs normally do not contain them.
+    """
+    candidates: List[str] = []
+
+    def add(value: str) -> None:
+        value = str(
+            value or ""
+        ).strip()
+
+        if not value:
+            return
+
+        value = value.split(
+            "#",
+            1,
+        )[0]
+
+        value = value.split(
+            "?",
+            1,
+        )[0]
+
+        if not value:
+            return
+
+        variants = [value]
+
+        if value.endswith("/"):
+            stripped = value.rstrip("/")
+            if stripped:
+                variants.append(stripped)
+        else:
+            variants.append(
+                value + "/"
+            )
+
+        for variant in list(variants):
+            if "://www." in variant:
+                variants.append(
+                    variant.replace(
+                        "://www.",
+                        "://",
+                        1,
+                    )
+                )
+
+        for variant in variants:
+            if (
+                variant
+                and variant not in candidates
+            ):
+                candidates.append(
+                    variant
+                )
+
+    add(
+        page_url or ""
+    )
+
+    # Fallback when only originating site + path are available.
+    if (
+        not candidates
+        and page_path
+    ):
+        host = _norm_site(
+            site
+        )
+
+        path_value = str(
+            page_path
+        ).strip()
+
+        if (
+            host
+            and path_value
+        ):
+            if not path_value.startswith(
+                "/"
+            ):
+                path_value = (
+                    "/"
+                    + path_value
+                )
+
+            add(
+                "https://"
+                + host
+                + path_value
+            )
+
+    return candidates
+
+
+def _retrieve_current_page_hits(
+    collections: List[str],
+    embedding: List[float],
+    page_urls: List[str],
+    geo_filter: Optional[qm.Filter],
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve a small number of query-relevant chunks from the
+    exact page the visitor is currently viewing.
+
+    Only already allowed collections are searched, so this does
+    not broaden site/collection scope.
+    """
+    if not page_urls:
+        return []
+
+    limit = max(
+        1,
+        min(
+            3,
+            PER_COLLECTION_LIMIT,
+        ),
+    )
+
+    hits: List[
+        Dict[str, Any]
+    ] = []
+
+    seen = set()
+
+    for collection in collections:
+        collection_hits = []
+
+        for page_url in page_urls:
+            must = []
+
+            if (
+                geo_filter
+                and geo_filter.must
+            ):
+                must.extend(
+                    list(
+                        geo_filter.must
+                    )
+                )
+
+            must.append(
+                qm.FieldCondition(
+                    key="url",
+                    match=qm.MatchValue(
+                        value=page_url
+                    ),
+                )
+            )
+
+            try:
+                search_results = (
+                    qdrant.search(
+                        collection_name=collection,
+                        query_vector=embedding,
+                        query_filter=qm.Filter(
+                            must=must
+                        ),
+                        limit=limit,
+                        with_payload=True,
+                    )
+                )
+            except Exception:
+                search_results = []
+
+            for result in search_results:
+                hit = _as_hit(
+                    collection,
+                    "current_page",
+                    result,
+                )
+
+                point_id = str(
+                    hit.get(
+                        "id",
+                        "",
+                    )
+                )
+
+                unique_id = (
+                    collection
+                    + "::"
+                    + point_id
+                )
+
+                if (
+                    point_id
+                    and unique_id in seen
+                ):
+                    continue
+
+                if point_id:
+                    seen.add(
+                        unique_id
+                    )
+
+                collection_hits.append(
+                    hit
+                )
+
+            # Exact URL candidate found. Do not search alternate
+            # slash/www variants for this collection.
+            if collection_hits:
+                break
+
+        hits.extend(
+            collection_hits
+        )
+
+    hits.sort(
+        key=lambda hit: float(
+            hit.get(
+                "score",
+                0.0,
+            )
+        ),
+        reverse=True,
+    )
+
+    # Keep current-page influence deliberately small.
+    return hits[:limit]
+
+
 def retrieve_context(
     query: str,
     site: str,
     lat: Optional[float] = None,
     lon: Optional[float] = None,
     radius_km: Optional[float] = None,
+    page_url: Optional[str] = None,
+    page_path: Optional[str] = None,
 ) -> Tuple[
     str,
     List[Dict[str, str]],
@@ -3746,6 +4117,93 @@ def retrieve_context(
         )
     )
 
+    # -----------------------------------------------------
+    # Current-page semantic retrieval
+    # -----------------------------------------------------
+    #
+    # Preserve normal retrieval, but guarantee a small number
+    # of query-relevant chunks from the page the visitor is
+    # currently viewing when that page exists in an allowed KB.
+    #
+    current_page_urls = (
+        _current_page_url_candidates(
+            page_url=page_url,
+            site=site,
+            page_path=page_path,
+        )
+    )
+
+    current_page_hits = (
+        _retrieve_current_page_hits(
+            collections=collections,
+            embedding=embedding,
+            page_urls=current_page_urls,
+            geo_filter=geo_filter,
+        )
+    )
+
+    current_page_results = []
+
+    if current_page_hits:
+        current_page_ranked = (
+            _rrf_merge(
+                [
+                    current_page_hits
+                ],
+                RRF_K,
+            )
+        )
+
+        current_page_results = (
+            _convert_ranked_hits(
+                current_page_ranked
+            )
+        )
+
+        current_keys = {
+            (
+                str(
+                    item.get(
+                        "collection",
+                        "",
+                    )
+                ),
+                str(
+                    item.get(
+                        "id",
+                        "",
+                    )
+                ),
+            )
+            for item in current_page_results
+        }
+
+        # Current-page results come first so _select_top_chunks()
+        # reserves a few slots for them. Duplicate normal results
+        # are removed by collection + point ID.
+        results = (
+            current_page_results
+            + [
+                item
+                for item in results
+                if (
+                    str(
+                        item.get(
+                            "collection",
+                            "",
+                        )
+                    ),
+                    str(
+                        item.get(
+                            "id",
+                            "",
+                        )
+                    ),
+                )
+                not in current_keys
+            ]
+        )
+
     results = (
         _apply_coinpages_boosts(
             results,
@@ -3767,6 +4225,73 @@ def retrieve_context(
         results,
         collections,
         intent,
+    )
+
+    selected = (
+        _ensure_current_page_selection(
+            selected=selected,
+            current_page_results=current_page_results,
+        )
+    )
+
+    # Recalculate counts because deterministic current-page
+    # insertion may replace lower-ranked normal selections.
+    collection_counts = {}
+
+    for item in selected:
+        collection = str(
+            item.get(
+                "collection",
+                "",
+            )
+        )
+
+        collection_counts[
+            collection
+        ] = (
+            collection_counts.get(
+                collection,
+                0,
+            )
+            + 1
+        )
+
+    current_page_keys = {
+        (
+            str(
+                item.get(
+                    "collection",
+                    "",
+                )
+            ),
+            str(
+                item.get(
+                    "id",
+                    "",
+                )
+            ),
+        )
+        for item in current_page_results
+    }
+
+    current_page_selected_count = sum(
+        1
+        for item in selected
+        if (
+            str(
+                item.get(
+                    "collection",
+                    "",
+                )
+            ),
+            str(
+                item.get(
+                    "id",
+                    "",
+                )
+            ),
+        )
+        in current_page_keys
     )
 
     groups = (
@@ -3890,6 +4415,15 @@ def retrieve_context(
         ),
         "retrieval_mode": (
             retrieval_mode
+        ),
+        "current_page_retrieval_used": bool(
+            current_page_hits
+        ),
+        "current_page_candidates": len(
+            current_page_hits
+        ),
+        "current_page_selected": (
+            current_page_selected_count
         ),
         "scope_retrieval_query": (
             scope_retrieval_query
@@ -7646,16 +8180,14 @@ Return only the required JSON object.
         # Deterministic same-Excerpt fee qualifier stabilization
         # -------------------------------------------------
         #
-        # The extractor may inconsistently omit an explicitly
-        # stated "No monthly fee" qualifier from
-        # requested_fact_condition.
+        # Preserve important fee qualifiers that the extractor
+        # may omit from requested_fact_condition.
         #
-        # Add it only when:
-        # - this is a fee fact,
-        # - the primary fact evidence was found in a real
-        #   Excerpt body,
-        # - ownership was resolved, and
-        # - that SAME Excerpt explicitly states "No monthly fee".
+        # Qualifiers are added only when:
+        # - this is a validated fee fact,
+        # - the fact evidence comes from a real Excerpt,
+        # - ownership is resolved, and
+        # - the SAME Excerpt explicitly supports the qualifier.
         #
         requested_fact_for_qualifiers = (
             normalize_evidence_text(
@@ -7689,8 +8221,6 @@ Return only the required JSON object.
             and fact_scope_supported
             and evidence_in_excerpt_body
             and owner_evidence_resolved
-            and "no monthly fee"
-            in fact_excerpt_body_normalized
         ):
             condition = str(
                 normalized.get(
@@ -7706,29 +8236,136 @@ Return only the required JSON object.
                 )
             )
 
+            # Coinsnap-credit qualifier owner guard
+            #
+            # A condition about prepaid Coinsnap credit belongs
+            # to the Coinsnap transaction fee. Never attach it
+            # to a fee owned by DFX or another provider, even if
+            # both fees appear inside the same retrieved Excerpt.
+            fee_owner = str(
+                normalized.get(
+                    "requested_fact_owner",
+                    "",
+                )
+                or normalized.get(
+                    "requested_entity",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            fee_owner_normalized = (
+                normalize_entity_name(
+                    fee_owner
+                )
+            )
+
+            coinsnap_owner_normalized = (
+                normalize_entity_name(
+                    "Coinsnap"
+                )
+            )
+
+            owner_is_coinsnap = (
+                bool(
+                    fee_owner_normalized
+                )
+                and fee_owner_normalized
+                == coinsnap_owner_normalized
+            )
+
+            # The model itself may already have copied the
+            # Coinsnap-credit condition onto another provider's
+            # fee. Remove only that sentence and preserve any
+            # unrelated valid condition text.
             if (
-                "no monthly fee"
-                not in condition_normalized
+                "coinsnap credit"
+                in condition_normalized
+                and not owner_is_coinsnap
             ):
-                condition = condition.rstrip(
-                    " ."
+                condition_parts = re.split(
+                    r"(?<=[.!?])\s+|\n+",
+                    condition,
                 )
 
-                if condition:
-                    condition += ". "
+                condition = " ".join(
+                    part.strip()
+                    for part in condition_parts
+                    if (
+                        part
+                        and part.strip()
+                        and "coinsnap credit"
+                        not in normalize_evidence_text(
+                            part
+                        )
+                    )
+                ).strip()
 
-                # Keep this deterministic augmentation English-only
-                # for now; other languages retain extractor output.
+                condition_normalized = (
+                    normalize_evidence_text(
+                        condition
+                    )
+                )
+
+            if (
+                (lang or "")
+                .lower()
+                .startswith("en")
+            ):
+                # Payment of the provider fee from prepaid
+                # Coinsnap credit.
                 if (
-                    (lang or "")
-                    .lower()
-                    .startswith("en")
+                    owner_is_coinsnap
+                    and "charged against"
+                    in fact_excerpt_body_normalized
+                    and "prepaid coinsnap credit"
+                    in fact_excerpt_body_normalized
+                    and "prepaid coinsnap credit"
+                    not in condition_normalized
                 ):
-                    condition += "No monthly fee."
+                    prepaid_qualifier = (
+                        "charged against the merchant's "
+                        "prepaid Coinsnap credit."
+                    )
 
-                normalized[
-                    "requested_fact_condition"
-                ] = condition[:500]
+                    if condition:
+                        condition = (
+                            prepaid_qualifier
+                            + " "
+                            + condition
+                        )
+                    else:
+                        condition = (
+                            prepaid_qualifier
+                        )
+
+                    condition_normalized = (
+                        normalize_evidence_text(
+                            condition
+                        )
+                    )
+
+                # Explicit absence of a monthly provider fee.
+                if (
+                    "no monthly fee"
+                    in fact_excerpt_body_normalized
+                    and "no monthly fee"
+                    not in condition_normalized
+                ):
+                    condition = condition.rstrip(
+                        " ."
+                    )
+
+                    if condition:
+                        condition += ". "
+
+                    condition += (
+                        "No monthly fee."
+                    )
+
+            normalized[
+                "requested_fact_condition"
+            ] = condition[:500]
 
         # -------------------------------------------------
         # Final requested-fact acceptance
@@ -7760,6 +8397,905 @@ Return only the required JSON object.
             normalized[
                 "requested_fact_owner_evidence"
             ] = ""
+
+    # -------------------------------------------------
+    # Related-evidence primary fact recovery
+    # -------------------------------------------------
+    #
+    # The model may occasionally put an explicitly supported
+    # qualifier or KYC fact into a same-owner related fact
+    # instead of the requested primary fact.
+    #
+    # Recovery is deliberately conservative:
+    # - owner must match the requested entity,
+    # - fact family must match,
+    # - quoted owner_evidence must exist in the real context,
+    # - fee value must match the primary value,
+    # - scoped KYC recovery must match the scope asked by user.
+    #
+    requested_entity_recovery = str(
+        normalized.get(
+            "requested_entity",
+            "",
+        )
+        or ""
+    ).strip()
+
+    requested_fact_recovery = str(
+        normalized.get(
+            "requested_fact",
+            "",
+        )
+        or ""
+    ).strip()
+
+    requested_status_recovery = str(
+        normalized.get(
+            "requested_fact_status",
+            "",
+        )
+        or ""
+    ).strip()
+
+    requested_value_recovery = str(
+        normalized.get(
+            "requested_fact_value",
+            "",
+        )
+        or ""
+    ).strip()
+
+    requested_condition_recovery = str(
+        normalized.get(
+            "requested_fact_condition",
+            "",
+        )
+        or ""
+    ).strip()
+
+    requested_entity_recovery_norm = (
+        normalize_entity_name(
+            requested_entity_recovery
+        )
+    )
+
+    requested_fact_recovery_norm = (
+        normalize_evidence_text(
+            requested_fact_recovery
+        )
+    )
+
+    requested_value_recovery_norm = (
+        normalize_evidence_text(
+            requested_value_recovery
+        )
+    )
+
+    message_recovery_norm = (
+        normalize_evidence_text(
+            message
+        )
+    )
+
+    context_recovery_norm = (
+        normalize_evidence_text(
+            context
+        )
+    )
+
+    related_recovery_items = (
+        normalized.get(
+            "related_facts",
+            [],
+        )
+        or []
+    )
+
+    # -------------------------------------------------
+    # Fee charging-method recovery
+    # -------------------------------------------------
+    #
+    # Example:
+    # primary: Coinsnap fee = 1%
+    # related evidence:
+    # "The 1% transaction fee is deducted from this
+    # Coinsnap credit ..."
+    #
+    if (
+        requested_status_recovery == "specified"
+        and requested_value_recovery
+        and contains_any(
+            requested_fact_recovery_norm,
+            [
+                "fee",
+                "fees",
+                "gebühr",
+                "gebuehr",
+                "kosten",
+            ],
+        )
+        and "coinsnap credit"
+        not in normalize_evidence_text(
+            requested_condition_recovery
+        )
+    ):
+        for item in related_recovery_items:
+            if not isinstance(
+                item,
+                dict,
+            ):
+                continue
+
+            related_owner = str(
+                item.get(
+                    "owner",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            related_fact_type = str(
+                item.get(
+                    "fact_type",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            related_value = str(
+                item.get(
+                    "value",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            related_evidence = str(
+                item.get(
+                    "owner_evidence",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not related_evidence:
+                continue
+
+            related_owner_norm = (
+                normalize_entity_name(
+                    related_owner
+                )
+            )
+
+            related_fact_norm = (
+                normalize_evidence_text(
+                    related_fact_type
+                )
+            )
+
+            related_value_norm = (
+                normalize_evidence_text(
+                    related_value
+                )
+            )
+
+            related_evidence_norm = (
+                normalize_evidence_text(
+                    related_evidence
+                )
+            )
+
+            if (
+                not requested_entity_recovery_norm
+                or related_owner_norm
+                != requested_entity_recovery_norm
+            ):
+                continue
+
+            if not contains_any(
+                related_fact_norm,
+                [
+                    "fee",
+                    "fees",
+                    "gebühr",
+                    "gebuehr",
+                    "kosten",
+                ],
+            ):
+                continue
+
+            if (
+                not related_value_norm
+                or related_value_norm
+                != requested_value_recovery_norm
+            ):
+                continue
+
+            if (
+                not related_evidence_norm
+                or related_evidence_norm
+                not in context_recovery_norm
+            ):
+                continue
+
+            if (
+                "coinsnap credit"
+                not in related_evidence_norm
+            ):
+                continue
+
+            if not (
+                "deducted from"
+                in related_evidence_norm
+                or "charged against"
+                in related_evidence_norm
+            ):
+                continue
+
+            if (
+                (lang or "")
+                .lower()
+                .startswith("de")
+            ):
+                qualifier = (
+                    "Die Gebühr wird vom "
+                    "Coinsnap-Guthaben abgezogen."
+                )
+            else:
+                qualifier = (
+                    "The fee is deducted from the "
+                    "merchant's Coinsnap credit."
+                )
+
+            condition = (
+                requested_condition_recovery
+                .rstrip(" .")
+            )
+
+            if condition:
+                condition += ". "
+
+            condition += qualifier
+
+            normalized[
+                "requested_fact_condition"
+            ] = condition[:500]
+
+            requested_condition_recovery = (
+                condition
+            )
+
+            break
+
+    # -------------------------------------------------
+    # Explicit no-KYC recovery
+    # -------------------------------------------------
+    #
+    # Promote an explicit same-owner related KYC statement
+    # only when the related scope is also present in the
+    # user's question. This prevents "no KYC for direct
+    # wallet settlement" from being reused for bank payout.
+    #
+    if (
+        requested_status_recovery
+        == "not_specified"
+        and contains_any(
+            requested_fact_recovery_norm,
+            [
+                "kyc",
+                "kyb",
+                "verification",
+                "verifizierung",
+            ],
+        )
+    ):
+        for item in related_recovery_items:
+            if not isinstance(
+                item,
+                dict,
+            ):
+                continue
+
+            related_owner = str(
+                item.get(
+                    "owner",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            related_fact_type = str(
+                item.get(
+                    "fact_type",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            related_scope = str(
+                item.get(
+                    "scope",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            related_evidence = str(
+                item.get(
+                    "owner_evidence",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not related_evidence:
+                continue
+
+            related_owner_norm = (
+                normalize_entity_name(
+                    related_owner
+                )
+            )
+
+            related_fact_norm = (
+                normalize_evidence_text(
+                    related_fact_type
+                )
+            )
+
+            related_scope_norm = (
+                normalize_evidence_text(
+                    related_scope
+                )
+            )
+
+            related_evidence_norm = (
+                normalize_evidence_text(
+                    related_evidence
+                )
+            )
+
+            if (
+                not requested_entity_recovery_norm
+                or related_owner_norm
+                != requested_entity_recovery_norm
+            ):
+                continue
+
+            if not contains_any(
+                related_fact_norm,
+                [
+                    "kyc",
+                    "kyb",
+                    "verification",
+                    "verifizierung",
+                ],
+            ):
+                continue
+
+            if (
+                related_scope_norm
+                and related_scope_norm
+                not in message_recovery_norm
+            ):
+                continue
+
+            if (
+                not related_evidence_norm
+                or related_evidence_norm
+                not in context_recovery_norm
+            ):
+                continue
+
+            explicit_no_kyc = (
+                "does not require kyc"
+                in related_evidence_norm
+                or "no kyc required"
+                in related_evidence_norm
+                or "no kyc verification"
+                in related_evidence_norm
+                or "without kyc"
+                in related_evidence_norm
+            )
+
+            if not explicit_no_kyc:
+                continue
+
+            if (
+                (lang or "")
+                .lower()
+                .startswith("de")
+            ):
+                if related_scope:
+                    recovered_value = (
+                        "Keine KYC-Verifizierung "
+                        f"für {related_scope} erforderlich"
+                    )
+                else:
+                    recovered_value = (
+                        "Keine KYC-Verifizierung erforderlich"
+                    )
+            else:
+                if related_scope:
+                    recovered_value = (
+                        "No KYC verification required "
+                        f"for {related_scope}"
+                    )
+                else:
+                    recovered_value = (
+                        "No KYC verification required"
+                    )
+
+            normalized[
+                "requested_fact_status"
+            ] = "specified"
+
+            normalized[
+                "requested_fact_value"
+            ] = recovered_value
+
+            normalized[
+                "requested_fact_condition"
+            ] = ""
+
+            normalized[
+                "requested_fact_owner"
+            ] = requested_entity_recovery
+
+            normalized[
+                "requested_fact_evidence"
+            ] = related_evidence[:1000]
+
+            normalized[
+                "requested_fact_owner_evidence"
+            ] = related_evidence[:1000]
+
+            break
+
+    # -------------------------------------------------
+    # Deterministic context-backed scope recovery
+    # -------------------------------------------------
+    #
+    # Do not depend on the model emitting a related_fact.
+    # Recover only from an explicit sentence in the retrieved
+    # context that names the requested owner and supports the
+    # exact requested scope.
+    #
+    context_sentences = [
+        part.strip()
+        for part in re.split(
+            r"(?<=[.!?])\s+|\n+",
+            str(context or ""),
+        )
+        if part and part.strip()
+    ]
+
+    recovery_entity = str(
+        normalized.get(
+            "requested_entity",
+            "",
+        )
+        or ""
+    ).strip()
+
+    recovery_entity_norm = (
+        normalize_entity_name(
+            recovery_entity
+        )
+    )
+
+    recovery_fact = str(
+        normalized.get(
+            "requested_fact",
+            "",
+        )
+        or ""
+    ).strip()
+
+    recovery_fact_norm = (
+        normalize_evidence_text(
+            recovery_fact
+        )
+    )
+
+    recovery_status = str(
+        normalized.get(
+            "requested_fact_status",
+            "",
+        )
+        or ""
+    ).strip()
+
+    recovery_value = str(
+        normalized.get(
+            "requested_fact_value",
+            "",
+        )
+        or ""
+    ).strip()
+
+    recovery_condition = str(
+        normalized.get(
+            "requested_fact_condition",
+            "",
+        )
+        or ""
+    ).strip()
+
+    recovery_message_norm = (
+        normalize_evidence_text(
+            message
+        )
+    )
+
+    # -------------------------------------------------
+    # Fee charging method from explicit context sentence
+    # -------------------------------------------------
+    if (
+        recovery_status == "specified"
+        and recovery_value
+        and contains_any(
+            recovery_fact_norm,
+            [
+                "fee",
+                "fees",
+                "gebühr",
+                "gebuehr",
+                "kosten",
+            ],
+        )
+        and "coinsnap credit"
+        not in normalize_evidence_text(
+            recovery_condition
+        )
+    ):
+        for sentence in context_sentences:
+            sentence_norm = (
+                normalize_evidence_text(
+                    sentence
+                )
+            )
+
+            sentence_owner_norm = (
+                normalize_entity_name(
+                    sentence
+                )
+            )
+
+            if (
+                not recovery_entity_norm
+                or recovery_entity_norm
+                not in sentence_owner_norm
+            ):
+                continue
+
+            if (
+                recovery_value.casefold()
+                not in sentence.casefold()
+            ):
+                continue
+
+            if (
+                "coinsnap credit"
+                not in sentence_norm
+            ):
+                continue
+
+            if not (
+                "deducted from"
+                in sentence_norm
+                or "charged against"
+                in sentence_norm
+            ):
+                continue
+
+            if (
+                (lang or "")
+                .lower()
+                .startswith("de")
+            ):
+                qualifier = (
+                    "Die Gebühr wird vom "
+                    "Coinsnap-Guthaben abgezogen."
+                )
+            else:
+                qualifier = (
+                    "The fee is deducted from the "
+                    "merchant's Coinsnap credit."
+                )
+
+            condition = (
+                recovery_condition
+                .rstrip(" .")
+            )
+
+            if condition:
+                condition += ". "
+
+            condition += qualifier
+
+            normalized[
+                "requested_fact_condition"
+            ] = condition[:500]
+
+            break
+
+    # -------------------------------------------------
+    # Explicit no-KYC direct-wallet recovery
+    # -------------------------------------------------
+    recovery_value_norm = (
+        normalize_evidence_text(
+            recovery_value
+        )
+    )
+
+    kyc_scope_already_explicit = (
+        "direct" in recovery_value_norm
+        and "wallet" in recovery_value_norm
+    )
+
+    if (
+        recovery_status
+        in {
+            "not_specified",
+            "specified",
+        }
+        and not kyc_scope_already_explicit
+        and contains_any(
+            recovery_fact_norm,
+            [
+                "kyc",
+                "kyb",
+                "verification",
+                "verifizierung",
+            ],
+        )
+        and "direct" in recovery_message_norm
+        and "wallet" in recovery_message_norm
+    ):
+        for sentence in context_sentences:
+            sentence_norm = (
+                normalize_evidence_text(
+                    sentence
+                )
+            )
+
+            sentence_owner_norm = (
+                normalize_entity_name(
+                    sentence
+                )
+            )
+
+            if (
+                not recovery_entity_norm
+                or recovery_entity_norm
+                not in sentence_owner_norm
+            ):
+                continue
+
+            if not (
+                "does not require kyc"
+                in sentence_norm
+                or "no kyc required"
+                in sentence_norm
+                or "no kyc verification"
+                in sentence_norm
+            ):
+                continue
+
+            # The evidence itself must also be about direct
+            # payment/settlement to a wallet. This prevents a
+            # no-KYC statement from one payout mode being
+            # reused for another.
+            if not (
+                "wallet" in sentence_norm
+                and (
+                    "direct" in sentence_norm
+                    or "directly" in sentence_norm
+                )
+            ):
+                continue
+
+            if (
+                (lang or "")
+                .lower()
+                .startswith("de")
+            ):
+                recovered_value = (
+                    "Keine KYC-Verifizierung für "
+                    "direkte Wallet-Auszahlung erforderlich"
+                )
+            else:
+                recovered_value = (
+                    "No KYC verification required "
+                    "for direct wallet settlement"
+                )
+
+            normalized[
+                "requested_fact_status"
+            ] = "specified"
+
+            normalized[
+                "requested_fact_value"
+            ] = recovered_value
+
+            normalized[
+                "requested_fact_condition"
+            ] = ""
+
+            normalized[
+                "requested_fact_owner"
+            ] = recovery_entity
+
+            normalized[
+                "requested_fact_evidence"
+            ] = sentence[:1000]
+
+            normalized[
+                "requested_fact_owner_evidence"
+            ] = sentence[:1000]
+
+            break
+
+    # -------------------------------------------------
+    # Related Coinsnap fee context recovery
+    # -------------------------------------------------
+    #
+    # A related Coinsnap fee may be correctly extracted as 1%
+    # while its model-provided owner_evidence omits how the fee
+    # is charged. Recover that qualifier only from an explicit
+    # context sentence that contains:
+    # - Coinsnap,
+    # - the same fee value,
+    # - a fee reference,
+    # - Coinsnap credit, and
+    # - an explicit charged/deducted relation.
+    #
+    related_items = (
+        normalized.get(
+            "related_facts",
+            [],
+        )
+        or []
+    )
+
+    context_sentences = [
+        part.strip()
+        for part in re.split(
+            r"(?<=[.!?])\s+|\n+",
+            str(context or ""),
+        )
+        if part and part.strip()
+    ]
+
+    for item in related_items:
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        owner = str(
+            item.get(
+                "owner",
+                "",
+            )
+            or ""
+        ).strip()
+
+        fact_type = str(
+            item.get(
+                "fact_type",
+                "",
+            )
+            or item.get(
+                "scope",
+                "",
+            )
+            or ""
+        ).strip()
+
+        value = str(
+            item.get(
+                "value",
+                "",
+            )
+            or ""
+        ).strip()
+
+        condition = str(
+            item.get(
+                "condition",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if condition:
+            continue
+
+        if owner.casefold() != "coinsnap":
+            continue
+
+        if (
+            _scope_fact_family(
+                fact_type
+            )
+            != "fees"
+        ):
+            continue
+
+        if not value:
+            continue
+
+        value_normalized = (
+            " ".join(
+                value.casefold().split()
+            )
+        )
+
+        for sentence in context_sentences:
+            sentence_normalized = (
+                " ".join(
+                    sentence.casefold().split()
+                )
+            )
+
+            if (
+                "coinsnap"
+                not in sentence_normalized
+            ):
+                continue
+
+            if (
+                value_normalized
+                not in sentence_normalized
+            ):
+                continue
+
+            if (
+                "fee"
+                not in sentence_normalized
+            ):
+                continue
+
+            if (
+                "coinsnap credit"
+                not in sentence_normalized
+            ):
+                continue
+
+            if not (
+                "charged against"
+                in sentence_normalized
+                or "deducted from"
+                in sentence_normalized
+            ):
+                continue
+
+            if (
+                (lang or "")
+                .lower()
+                .startswith("de")
+            ):
+                item["condition"] = (
+                    "Die Gebühr wird vom "
+                    "Coinsnap-Guthaben abgezogen."
+                )
+            else:
+                item["condition"] = (
+                    "charged against the merchant's "
+                    "prepaid Coinsnap credit."
+                )
+
+            # Replace generic ownership evidence with the more
+            # specific explicit sentence that supports both
+            # owner and charging method.
+            item[
+                "owner_evidence"
+            ] = sentence[:1000]
+
+            break
 
     return (
         normalized,
@@ -7884,6 +9420,102 @@ def _resolve_compound_scope_entity(
         )
         or ""
     ).strip()
+
+
+def _scope_message_requires_full_answer(
+    message: str,
+) -> bool:
+    """
+    Return True when the user's question contains dimensions
+    that the deterministic structured scope renderer does not
+    yet model completely, or when the user explicitly asks for
+    a comparison between products/services.
+
+    In those cases the normal grounded answer should handle the
+    full question instead of returning only the recognized
+    structured fact subset.
+    """
+    value = " ".join(
+        str(message or "")
+        .casefold()
+        .split()
+    )
+
+    if not value:
+        return False
+
+    uncovered_patterns = [
+        # Custody / custody model
+        r"\bcustody\b",
+        r"\bcustodial\b",
+        r"\bnon[-\s]?custodial\b",
+        r"\bverwahrung\b",
+        r"\bverwahrungsmodell\b",
+
+        # Payout / settlement options
+        r"\bpayout\s+options?\b",
+        r"\bsettlement\s+options?\b",
+        r"\bauszahlungsoption(?:en)?\b",
+
+        # Technical / developer requirements
+        r"\btechnical\s+requirements?\b",
+        r"\btechnical\s+effort\b",
+        r"\btechnical\s+complexity\b",
+        r"\bdeveloper\s+requirements?\b",
+        r"\bdeveloper\s+friendliness\b",
+        r"\btechnische[nr]?\s+anforderungen?\b",
+        r"\btechnischer\s+aufwand\b",
+
+        # Operational / non-transaction costs
+        r"\bwhat\s+(?:other\s+)?costs?\b",
+        r"\bother\s+costs?\b",
+        r"\bhosting\s+costs?\b",
+        r"\bmaintenance\s+costs?\b",
+        r"\boperating\s+costs?\b",
+
+        # Verification / pricing dimensions
+        #
+        # These questions need explanatory context beyond the
+        # deterministic structured fact renderer.
+        r"\bkyb\b",
+        r"\bwho\s+(?:has\s+to|must|needs\s+to|is\s+required\s+to)"
+        r".{0,80}\b(?:verify|verification|verified)\b",
+        r"\bwer\s+(?:muss|braucht|benötigt|benoetigt)"
+        r".{0,80}\b(?:verifizieren|verifizierung|identitätsprüfung|identitaetspruefung)\b",
+
+        # Conversion price components such as spreads/margins
+        r"\b(?:fee|fees|cost|costs|trading|conversion|exchange\s+rate)"
+        r".{0,160}\b(?:spread|margin)\b",
+        r"\b(?:spread|margin)"
+        r".{0,160}\b(?:fee|fees|cost|costs|trading|conversion|exchange\s+rate)\b",
+        r"\badditional\s+(?:spread|margin)\b",
+        r"\bzusätzliche[rn]?\s+(?:spread|marge|aufschlag)\b",
+    ]
+
+    comparison_patterns = [
+        r"\bcompare\b",
+        r"\bcomparison\b",
+        r"\bcompared\s+to\b",
+        r"\bdiffer\b",
+        r"\bdiffers\b",
+        r"\bdifference(?:s)?\b",
+        r"\bversus\b",
+        r"\bvs\.?\b",
+        r"\bvergleich(?:en|e)?\b",
+        r"\bunterschied(?:e|en)?\b",
+    ]
+
+    return any(
+        re.search(
+            pattern,
+            value,
+            flags=re.IGNORECASE,
+        )
+        for pattern in (
+            uncovered_patterns
+            + comparison_patterns
+        )
+    )
 
 
 def _split_scope_facts_from_message(
@@ -8293,6 +9925,35 @@ def _render_scope_answer(
 
     seen_related = set()
 
+    # -----------------------------------------------------
+    # Primary-vs-related semantic dedup
+    # -----------------------------------------------------
+    #
+    # The extractor may occasionally return the already
+    # validated primary fact again as a same-owner,
+    # same-family related fact. Suppress that duplicate
+    # before rendering while preserving genuinely distinct
+    # facts such as separate fee types.
+    requested_family = (
+        _scope_fact_family(
+            requested_fact
+        )
+    )
+
+    requested_primary_owner = (
+        requested_owner
+        or requested_entity
+    ).strip()
+
+    requested_primary_text = " ".join(
+        part
+        for part in (
+            requested_value,
+            requested_condition,
+        )
+        if part
+    ).strip()
+
     for item in related_facts:
         if not isinstance(item, dict):
             continue
@@ -8341,6 +10002,82 @@ def _render_scope_answer(
         # Do not render label-only fragments such as
         # "For DFX, the related KYC process."
         if not value and not condition:
+            continue
+
+        related_family = (
+            _scope_fact_family(
+                fact_type
+            )
+        )
+
+        related_text = " ".join(
+            part
+            for part in (
+                value,
+                condition,
+            )
+            if part
+        ).strip()
+
+        # Suppress a related fact only when its actual value
+        # and condition are already covered by the primary fact.
+        #
+        # Do not use the broader semantic-overlap helper here:
+        # numeric fee tiers such as 0.5%, 1.5%, and $0.25 can
+        # otherwise look artificially similar after tokenization.
+        primary_value_key = re.sub(
+            r"\\s+",
+            " ",
+            requested_value.casefold(),
+        ).strip(" .!?\\n\\t")
+
+        primary_condition_key = re.sub(
+            r"\\s+",
+            " ",
+            requested_condition.casefold(),
+        ).strip(" .!?\\n\\t")
+
+        related_value_key = re.sub(
+            r"\\s+",
+            " ",
+            value.casefold(),
+        ).strip(" .!?\\n\\t")
+
+        related_condition_key = re.sub(
+            r"\\s+",
+            " ",
+            condition.casefold(),
+        ).strip(" .!?\\n\\t")
+
+        related_value_covered = (
+            not related_value_key
+            or (
+                bool(primary_value_key)
+                and related_value_key
+                in primary_value_key
+            )
+        )
+
+        related_condition_covered = (
+            not related_condition_key
+            or (
+                bool(primary_condition_key)
+                and related_condition_key
+                in primary_condition_key
+            )
+        )
+
+        if (
+            requested_status == "specified"
+            and requested_primary_owner
+            and owner.casefold()
+            == requested_primary_owner.casefold()
+            and requested_family
+            and related_family
+            == requested_family
+            and related_value_covered
+            and related_condition_covered
+        ):
             continue
 
         key = (
@@ -8551,6 +10288,233 @@ def _scope_numeric_tokens(
             value,
         )
     )
+
+
+
+def _stabilize_compound_fee_fact(
+    facts: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Deterministic compound fee atomization.
+
+    If one already validated primary fee fact contains multiple
+    clearly separated fee subtypes in separate evidence
+    sentences, preserve them as independent fee facts instead
+    of assigning one display label to the combined value.
+
+    No new ownership is inferred: all generated subfacts retain
+    the already validated primary owner.
+    """
+    output = dict(
+        facts or {}
+    )
+
+    requested_fact = str(
+        output.get(
+            "requested_fact",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if (
+        _scope_fact_family(
+            requested_fact
+        )
+        != "fees"
+    ):
+        return output
+
+    if (
+        str(
+            output.get(
+                "requested_fact_status",
+                "",
+            )
+            or ""
+        ).strip()
+        != "specified"
+    ):
+        return output
+
+    evidence = str(
+        output.get(
+            "requested_fact_evidence",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not evidence:
+        return output
+
+    fee_subtypes = (
+        "bank payout fee",
+        "conversion spread",
+        "transaction fee",
+        "withdrawal fee",
+    )
+
+    atomic_fees = []
+
+    for sentence in re.split(
+        r"(?<=[.!?])\s+|\n+",
+        evidence,
+    ):
+        sentence = (
+            sentence
+            or ""
+        ).strip()
+
+        if not sentence:
+            continue
+
+        lowered = sentence.casefold()
+
+        matched_types = [
+            subtype
+            for subtype in fee_subtypes
+            if subtype in lowered
+        ]
+
+        # A sentence mentioning multiple fee owners/types is
+        # deliberately not split here.
+        if len(matched_types) != 1:
+            continue
+
+        value_match = re.search(
+            r"\b\d+(?:\.\d+)?\s*%",
+            sentence,
+        )
+
+        if not value_match:
+            continue
+
+        atomic_fees.append({
+            "fact_type": matched_types[0],
+            "value": value_match.group(0).replace(
+                " ",
+                "",
+            ),
+            "evidence": sentence,
+        })
+
+    distinct_types = {
+        item["fact_type"]
+        for item in atomic_fees
+    }
+
+    if (
+        len(atomic_fees) < 2
+        or len(distinct_types) < 2
+    ):
+        return output
+
+    owner = str(
+        output.get(
+            "requested_fact_owner",
+            "",
+        )
+        or output.get(
+            "requested_entity",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not owner:
+        return output
+
+    primary = atomic_fees[0]
+
+    output[
+        "requested_fact"
+    ] = primary["fact_type"]
+
+    output[
+        "requested_fact_value"
+    ] = primary["value"]
+
+    output[
+        "requested_fact_evidence"
+    ] = primary["evidence"]
+
+    # A condition attached to the previous combined value must
+    # not automatically be copied to only one of the split
+    # fee types.
+    output[
+        "requested_fact_condition"
+    ] = ""
+
+    related = list(
+        output.get(
+            "related_facts",
+            [],
+        )
+        or []
+    )
+
+    existing_keys = {
+        (
+            str(
+                item.get(
+                    "owner",
+                    "",
+                )
+                or ""
+            ).strip().casefold(),
+            str(
+                item.get(
+                    "fact_type",
+                    "",
+                )
+                or ""
+            ).strip().casefold(),
+            str(
+                item.get(
+                    "value",
+                    "",
+                )
+                or ""
+            ).strip().casefold(),
+        )
+        for item in related
+        if isinstance(
+            item,
+            dict,
+        )
+    }
+
+    for atomic in atomic_fees[1:]:
+        key = (
+            owner.casefold(),
+            atomic["fact_type"].casefold(),
+            atomic["value"].casefold(),
+        )
+
+        if key in existing_keys:
+            continue
+
+        related.append({
+            "owner": owner,
+            "owner_evidence":
+                atomic["evidence"],
+            "scope":
+                atomic["fact_type"],
+            "fact_type":
+                atomic["fact_type"],
+            "value":
+                atomic["value"],
+            "condition": "",
+        })
+
+        existing_keys.add(key)
+
+    output[
+        "related_facts"
+    ] = related
+
+    return output
 
 
 def _stabilize_compound_limit_fact(
@@ -8858,6 +10822,12 @@ def _render_compound_scope_answer(
             )
         )
 
+        local_facts = (
+            _stabilize_compound_fee_fact(
+                local_facts
+            )
+        )
+
         requested_fact = str(
             local_facts.get(
                 "requested_fact",
@@ -9031,6 +11001,74 @@ def _render_compound_scope_answer(
                         ),
                     )
                 )
+
+                # Coinsnap related-fee credit qualifier
+                #
+                # When a related Coinsnap fee carries explicit
+                # evidence that the fee is charged against or
+                # deducted from Coinsnap credit, preserve that
+                # qualifier on the Coinsnap fee itself.
+                related_owner_normalized = (
+                    " ".join(
+                        owner.casefold().split()
+                    )
+                )
+
+                coinsnap_owner_normalized = (
+                    "coinsnap"
+                )
+
+                related_evidence = str(
+                    clean_item.get(
+                        "owner_evidence",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                related_evidence_normalized = (
+                    " ".join(
+                        related_evidence
+                        .casefold()
+                        .split()
+                    )
+                )
+
+                existing_related_condition = str(
+                    clean_item.get(
+                        "condition",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                if (
+                    related_owner_normalized
+                    == coinsnap_owner_normalized
+                    and not existing_related_condition
+                    and "coinsnap credit"
+                    in related_evidence_normalized
+                    and (
+                        "charged against"
+                        in related_evidence_normalized
+                        or "deducted from"
+                        in related_evidence_normalized
+                    )
+                ):
+                    if (
+                        (lang or "")
+                        .lower()
+                        .startswith("de")
+                    ):
+                        clean_item["condition"] = (
+                            "Die Gebühr wird vom "
+                            "Coinsnap-Guthaben abgezogen."
+                        )
+                    else:
+                        clean_item["condition"] = (
+                            "charged against the merchant's "
+                            "prepaid Coinsnap credit."
+                        )
 
             filtered_related.append(
                 clean_item
@@ -9468,6 +11506,9 @@ def generate_grounded_answer_and_suggestions(
         and _needs_structured_scope_path(
             message
         )
+        and not _scope_message_requires_full_answer(
+            message
+        )
     ):
         (
             scope_facts,
@@ -9493,6 +11534,55 @@ def generate_grounded_answer_and_suggestions(
                 message
             )
         )
+
+        # -------------------------------------------------
+        # Atomic single-fact scope stabilization
+        # -------------------------------------------------
+        #
+        # If the user's message clearly names exactly one
+        # supported fact family, re-run extraction with explicit
+        # entity + fact overrides. This avoids stochastic
+        # specified/not_specified flips in otherwise identical
+        # single-fact requests.
+        #
+        if (
+            scope_fact_extraction_error is None
+            and scope_facts
+            and len(message_scope_facts) == 1
+        ):
+            single_fact_entity = (
+                _resolve_compound_scope_entity(
+                    scope_facts
+                )
+            )
+
+            if single_fact_entity:
+                (
+                    atomic_single_facts,
+                    atomic_single_error,
+                ) = _extract_scope_facts(
+                    message=message,
+                    context=context,
+                    session_id=session_id,
+                    lang=lang,
+                    requested_entity_override=(
+                        single_fact_entity
+                    ),
+                    requested_fact_override=(
+                        message_scope_facts[0]
+                    ),
+                )
+
+                # Only replace the original extraction when
+                # atomic extraction itself succeeded. Otherwise
+                # retain the existing fallback behavior.
+                if (
+                    atomic_single_error is None
+                    and atomic_single_facts
+                ):
+                    scope_facts = (
+                        atomic_single_facts
+                    )
 
         if (
             not scope_fact_extraction_error
@@ -9671,6 +11761,9 @@ def generate_grounded_answer_and_suggestions(
             message
         )
         and _needs_structured_scope_path(
+            message
+        )
+        and not _scope_message_requires_full_answer(
             message
         )
     ):
@@ -10336,6 +12429,8 @@ async def chat(
             lat=inp.lat,
             lon=inp.lon,
             radius_km=inp.radius_km,
+            page_url=inp.pageUrl,
+            page_path=inp.path,
         )
 
     except RuntimeError as exc:
