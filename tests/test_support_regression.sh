@@ -31,6 +31,31 @@ request() {
         )"
 }
 
+
+request_page() {
+    local message="$1"
+    local session="$2"
+    local page_url="$3"
+    local page_path="$4"
+
+    curl -s "$API" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -n \
+            --arg message "$message" \
+            --arg session "$session" \
+            --arg page_url "$page_url" \
+            --arg page_path "$page_path" \
+            '{
+                message: $message,
+                site: "coinsnap.io",
+                sessionId: $session,
+                pageUrl: $page_url,
+                path: $page_path,
+                lang: "en"
+            }'
+        )"
+}
+
 echo "============================================================"
 echo "1. DFX multi-fact"
 echo "============================================================"
@@ -191,6 +216,128 @@ if echo "$R" | jq -e '
     pass "Frankfurt unsupported / Coinsnap isolation"
 else
     fail "Frankfurt unsupported / Coinsnap isolation"
+fi
+
+
+echo
+echo "============================================================"
+echo "5. FAQ fee responsibilities"
+echo "============================================================"
+
+R=$(request_page \
+    "Who pays which fees for a Bitcoin payment?" \
+    "regression-faq-fee-roles" \
+    "https://coinsnap.io/blog/bitcoin-lightning-faq-for-merchants/" \
+    "/blog/bitcoin-lightning-faq-for-merchants/"
+)
+
+echo "$R" | jq '{
+    reply,
+    answer_status: .meta.answer_status,
+    guardrail: .meta.guardrail,
+    current_page_retrieval_used: .meta.current_page_retrieval_used,
+    current_page_selected: .meta.current_page_selected,
+    scope_structured_used: .meta.scope_structured_used,
+    scope_audit_attempted: .meta.scope_audit_attempted,
+    scope_grounding_issues: .meta.scope_grounding_issues
+}'
+
+if echo "$R" | jq -e '
+    .meta.answer_status == "answered"
+    and .meta.guardrail == "ok"
+    and .meta.current_page_retrieval_used == true
+    and .meta.scope_structured_used == null
+    and .meta.scope_audit_attempted == false
+    and (.meta.scope_grounding_issues | length) == 0
+    and (
+        .reply
+        | ascii_downcase
+        | contains("wallet or network-related fees")
+    )
+    and (
+        .reply
+        | ascii_downcase
+        | contains("1% transaction fee")
+    )
+    and (
+        .reply
+        | ascii_downcase
+        | contains("prepaid coinsnap credit")
+    )
+    and (
+        .reply
+        | ascii_downcase
+        | contains("settlement provider")
+    )
+' >/dev/null; then
+    pass "FAQ fee responsibilities"
+else
+    fail "FAQ fee responsibilities"
+fi
+
+
+echo
+echo "============================================================"
+echo "6. FAQ bank settlement responsibility"
+echo "============================================================"
+
+R=$(request_page \
+    "Who performs the fiat conversion, bank payout and KYC when I receive Bitcoin payments into my bank account?" \
+    "regression-faq-bank-responsibility" \
+    "https://coinsnap.io/blog/bitcoin-lightning-faq-for-merchants/" \
+    "/blog/bitcoin-lightning-faq-for-merchants/"
+)
+
+echo "$R" | jq '{
+    reply,
+    answer_status: .meta.answer_status,
+    guardrail: .meta.guardrail,
+    current_page_retrieval_used: .meta.current_page_retrieval_used,
+    current_page_selected: .meta.current_page_selected,
+    scope_structured_used: .meta.scope_structured_used,
+    scope_audit_attempted: .meta.scope_audit_attempted,
+    scope_grounding_issues: .meta.scope_grounding_issues
+}'
+
+if echo "$R" | jq -e '
+    .meta.answer_status == "answered"
+    and .meta.guardrail == "ok"
+    and .meta.current_page_retrieval_used == true
+    and .meta.scope_structured_used == null
+    and .meta.scope_audit_attempted == false
+    and (.meta.scope_grounding_issues | length) == 0
+    and (
+        .reply
+        | ascii_downcase
+        | contains("settlement provider")
+    )
+    and (
+        .reply
+        | ascii_downcase
+        | contains("fiat conversion")
+    )
+    and (
+        .reply
+        | ascii_downcase
+        | contains("bank payout")
+    )
+    and (
+        .reply
+        | ascii_downcase
+        | contains("kyc")
+    )
+    and (
+        (
+            .reply
+            | ascii_downcase
+            | contains("no value for")
+        )
+        | not
+    )
+' >/dev/null; then
+    pass "FAQ bank settlement responsibility"
+else
+    fail "FAQ bank settlement responsibility"
 fi
 
 

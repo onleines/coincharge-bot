@@ -9473,6 +9473,25 @@ def _scope_message_requires_full_answer(
         r"\bmaintenance\s+costs?\b",
         r"\boperating\s+costs?\b",
 
+        # Role / responsibility questions
+        #
+        # Questions about who pays a fee or which party performs
+        # settlement/compliance work need explanatory context
+        # across multiple actors. The structured renderer models
+        # individual facts, but not those actor relationships.
+        r"\bwho\s+(?:pays?|is\s+charged|covers?|bears?)\b"
+        r".{0,120}\b(?:fee|fees|cost|costs)\b",
+        r"\bwer\s+(?:zahlt|bezahlt|trägt|traegt)\b"
+        r".{0,120}\b(?:gebühr|gebuehr|gebühren|gebuehren|kosten)\b",
+
+        r"\bwho\s+(?:performs?|handles?|provides?|does|"
+        r"is\s+responsible\s+for)\b"
+        r".{0,180}\b(?:fiat\s+conversion|conversion|"
+        r"bank\s+payout|payout|settlement|kyc|kyb|verification)\b",
+        r"\bwer\s+(?:führt|fuehrt|übernimmt|uebernimmt|macht)\b"
+        r".{0,180}\b(?:umrechnung|konvertierung|auszahlung|"
+        r"settlement|kyc|kyb|verifizierung)\b",
+
         # Verification / pricing dimensions
         #
         # These questions need explanatory context beyond the
