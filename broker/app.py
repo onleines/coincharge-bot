@@ -2107,6 +2107,15 @@ def _apply_scope_scores(
             + title_overlap * 0.15
         )
 
+        topic_adjustment = (
+            _retrieval_topic_adjustment(
+                query,
+                result,
+            )
+        )
+
+        scope_score += topic_adjustment
+
         result[
             "scope_score"
         ] = round(
@@ -2226,6 +2235,11 @@ def _select_top_chunks(
         int,
     ] = {}
 
+    url_counts: Dict[
+        str,
+        int,
+    ] = {}
+
     def add_result(
         result: Dict[str, Any],
     ) -> bool:
@@ -2250,6 +2264,24 @@ def _select_top_chunks(
             + point_id
         )
 
+        url = str(
+            result.get(
+                "url",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if (
+            url
+            and url_counts.get(
+                url,
+                0,
+            )
+            >= MAX_CHUNKS_PER_URL
+        ):
+            return False
+
         if (
             point_id
             and unique_id in seen
@@ -2264,6 +2296,17 @@ def _select_top_chunks(
         selected.append(
             result
         )
+
+        if url:
+            url_counts[
+                url
+            ] = (
+                url_counts.get(
+                    url,
+                    0,
+                )
+                + 1
+            )
 
         counts[
             collection
@@ -3289,6 +3332,507 @@ def _format_grouped_context_blocks(
 # -----------------------------------------------------------------------------
 
 
+def _build_semantic_retrieval_query(
+    message: str,
+    site: str,
+) -> str:
+    """
+    Add compact retrieval vocabulary for user concepts whose wording
+    differs from the terminology used on the website.
+
+    This affects retrieval only. It does not add facts to the answer.
+    """
+
+    q = (
+        message
+        or ""
+    ).casefold()
+
+    normalized_site = _norm_site(
+        site
+    )
+
+    parts: List[str] = []
+
+    def add(value: str) -> None:
+        value = (
+            value
+            or ""
+        ).strip()
+
+        if (
+            value
+            and value not in parts
+        ):
+            parts.append(value)
+
+    stablecoin_intent = any(
+        token in q
+        for token in (
+            "stablecoin",
+            "stablecoins",
+            "digital dollar",
+            "digital dollars",
+            "stable balance",
+            "stable-value",
+            "stable value",
+        )
+    )
+
+    if stablecoin_intent:
+        add(
+            "stablecoins Digital Dollars "
+            "Stable Balance stable-value Bitcoin wallet"
+        )
+
+        if normalized_site == "coinsnap.io":
+            add(
+                "Coinsnap Wallet Digital Dollars Stable Balance"
+            )
+
+    wallet_intent = (
+        "wallet" in q
+    )
+
+    pos_intent = any(
+        token in q
+        for token in (
+            "kasse",
+            "kassenfunktion",
+            "kassen-app",
+            "kassen app",
+            "zahlungsterminal",
+            "terminal",
+            "point of sale",
+            "pos",
+            "checkout",
+        )
+    )
+
+    if (
+        wallet_intent
+        and pos_intent
+    ):
+        add(
+            "Bitcoin wallet Point of Sale POS "
+            "merchant payment terminal"
+        )
+
+        if normalized_site == "coinsnap.io":
+            add(
+                "Coinsnap Wallet integrated Point of Sale"
+            )
+
+    bitcoin_acceptance_intent = (
+        "bitcoin" in q
+        and any(
+            token in q
+            for token in (
+                "annehmen",
+                "akzeptieren",
+                "zahlungsmittel",
+                "accept bitcoin",
+                "accepting bitcoin",
+                "bitcoin-zahlung",
+                "bitcoin zahlung",
+                "bitcoin payments",
+            )
+        )
+    )
+
+    if bitcoin_acceptance_intent:
+        add(
+            "accept Bitcoin payments merchant "
+            "Point of Sale online shop payment plugin payment link"
+        )
+
+        if normalized_site == "coinsnap.io":
+            add(
+                "Coinsnap merchant Bitcoin payments"
+            )
+
+    no_server_intent = any(
+        token in q
+        for token in (
+            "ohne eigenen server",
+            "ohne einen eigenen server",
+            "kein eigener server",
+            "without own server",
+            "without a server",
+            "no own server",
+            "self-hosted",
+            "self hosted",
+            "self-hosting",
+        )
+    )
+
+    if (
+        "bitcoin" in q
+        and no_server_intent
+    ):
+        add(
+            "managed hosted Bitcoin payment provider "
+            "without self-hosted payment server"
+        )
+
+        if normalized_site == "coinsnap.io":
+            add(
+                "Coinsnap managed Bitcoin payment service"
+            )
+
+    direct_wallet_intent = any(
+        token in q
+        for token in (
+            "direkt auf meine wallet",
+            "direkt auf die wallet",
+            "eigene wallet",
+            "meine wallet",
+            "own wallet",
+            "directly to my wallet",
+            "direct to my wallet",
+        )
+    )
+
+    if (
+        "bitcoin" in q
+        and direct_wallet_intent
+    ):
+        add(
+            "receive Bitcoin directly own wallet "
+            "self-custody Lightning Address on-chain address"
+        )
+
+        if normalized_site == "coinsnap.io":
+            add(
+                "Coinsnap Wallet receive Bitcoin"
+            )
+
+    headquarters_intent = any(
+        token in q
+        for token in (
+            "sitz in",
+            "firmensitz",
+            "unternehmenssitz",
+            "headquarters",
+            "registered office",
+            "based in",
+        )
+    )
+
+    if headquarters_intent:
+        add(
+            "company headquarters registered office "
+            "legal entity company location"
+        )
+
+    return " ".join(
+        parts
+    ).strip()
+
+
+def _retrieval_topic_adjustment(
+    query: str,
+    result: Dict[str, Any],
+) -> float:
+    """
+    Small intent-aware score adjustment.
+
+    The adjustment only promotes or demotes evidence already present
+    in the knowledge base. It must never manufacture product facts.
+    """
+
+    q = (
+        query
+        or ""
+    ).casefold()
+
+    title = str(
+        result.get(
+            "title",
+            "",
+        )
+        or ""
+    )
+
+    section_title = str(
+        result.get(
+            "section_title",
+            "",
+        )
+        or ""
+    )
+
+    section_path = " ".join(
+        str(value)
+        for value in (
+            result.get(
+                "section_path",
+                [],
+            )
+            or []
+        )
+    )
+
+    url = str(
+        result.get(
+            "url",
+            "",
+        )
+        or ""
+    )
+
+    chunk_text = str(
+        result.get(
+            "text",
+            "",
+        )
+        or ""
+    )
+
+    heading_blob = " ".join(
+        (
+            title,
+            section_title,
+            section_path,
+            url,
+        )
+    ).casefold()
+
+    evidence_blob = (
+        heading_blob
+        + " "
+        + chunk_text[:3000].casefold()
+    )
+
+    adjustment = 0.0
+
+    stablecoin_intent = any(
+        token in q
+        for token in (
+            "stablecoin",
+            "stablecoins",
+            "digital dollar",
+            "digital dollars",
+            "stable balance",
+            "stable-value",
+            "stable value",
+        )
+    )
+
+    stablecoin_evidence = any(
+        token in evidence_blob
+        for token in (
+            "stablecoin",
+            "stablecoins",
+            "digital dollar",
+            "digital dollars",
+            "stable balance",
+            "stable-value",
+            "stable value",
+            "stablesats",
+        )
+    )
+
+    settlement_evidence = any(
+        token in heading_blob
+        for token in (
+            "bank account",
+            "bank payout",
+            "fiat settlement",
+            "bitcoin payout",
+            "get paid to your bank",
+            "auszahlung",
+        )
+    )
+
+    if stablecoin_intent:
+        if stablecoin_evidence:
+            adjustment += 0.30
+        elif settlement_evidence:
+            adjustment -= 0.20
+
+    wallet_pos_intent = (
+        "wallet" in q
+        and any(
+            token in q
+            for token in (
+                "kasse",
+                "kassenfunktion",
+                "kassen-app",
+                "kassen app",
+                "zahlungsterminal",
+                "terminal",
+                "point of sale",
+                "pos",
+            )
+        )
+    )
+
+    if wallet_pos_intent:
+        wallet_evidence = (
+            "wallet" in evidence_blob
+        )
+
+        pos_evidence = any(
+            token in evidence_blob
+            for token in (
+                "point of sale",
+                "point-of-sale",
+                " pos ",
+                "kiosk mode",
+                "payment terminal",
+            )
+        )
+
+        if (
+            wallet_evidence
+            and pos_evidence
+        ):
+            adjustment += 0.25
+
+    bitcoin_acceptance_intent = (
+        "bitcoin" in q
+        and any(
+            token in q
+            for token in (
+                "annehmen",
+                "akzeptieren",
+                "zahlungsmittel",
+                "accept bitcoin",
+                "accepting bitcoin",
+                "bitcoin-zahlung",
+                "bitcoin zahlung",
+                "bitcoin payments",
+            )
+        )
+    )
+
+    settlement_query = any(
+        token in q
+        for token in (
+            "bank",
+            "fiat",
+            "euro",
+            " eur",
+            "chf",
+            "settlement",
+            "auszahl",
+            "payout",
+            "conversion",
+            "convert",
+            "umrechn",
+        )
+    )
+
+    accounting_query = any(
+        token in q
+        for token in (
+            "accounting",
+            "tax",
+            "taxes",
+            "steuer",
+            "buchhaltung",
+        )
+    )
+
+    if bitcoin_acceptance_intent:
+        if (
+            not settlement_query
+            and settlement_evidence
+        ):
+            adjustment -= 0.18
+
+        accounting_evidence = any(
+            token in heading_blob
+            for token in (
+                "accounting",
+                "tax",
+                "taxes",
+                "steuer",
+                "buchhaltung",
+            )
+        )
+
+        if (
+            not accounting_query
+            and accounting_evidence
+        ):
+            adjustment -= 0.18
+
+    no_server_intent = any(
+        token in q
+        for token in (
+            "ohne eigenen server",
+            "ohne einen eigenen server",
+            "kein eigener server",
+            "without own server",
+            "without a server",
+            "no own server",
+            "self-hosted",
+            "self hosted",
+        )
+    )
+
+    if no_server_intent:
+        if any(
+            token in evidence_blob
+            for token in (
+                "managed service",
+                "managed payment",
+                "hosted",
+                "btcpay server",
+                "payment infrastructure",
+                "no server",
+            )
+        ):
+            adjustment += 0.20
+
+    headquarters_intent = any(
+        token in q
+        for token in (
+            "sitz in",
+            "firmensitz",
+            "unternehmenssitz",
+            "headquarters",
+            "registered office",
+            "based in",
+        )
+    )
+
+    if headquarters_intent:
+        company_location_evidence = any(
+            token in evidence_blob
+            for token in (
+                "headquarters",
+                "registered office",
+                "legal entity",
+                "company is based",
+                "company based",
+                "registered in",
+            )
+        )
+
+        availability_only_evidence = any(
+            token in evidence_blob
+            for token in (
+                "supported countries",
+                "available in",
+                "availability",
+                "region",
+            )
+        )
+
+        if company_location_evidence:
+            adjustment += 0.25
+        elif availability_only_evidence:
+            adjustment -= 0.15
+
+    return round(
+        adjustment,
+        6,
+    )
+
+
 def _build_scope_retrieval_query(
     message: str,
 ) -> str:
@@ -3723,8 +4267,25 @@ def retrieve_context(
 
     started = time.time()
 
+    semantic_retrieval_query = (
+        _build_semantic_retrieval_query(
+            query,
+            site,
+        )
+    )
+
+    embedding_query = (
+        (
+            query
+            + " "
+            + semantic_retrieval_query
+        ).strip()
+        if semantic_retrieval_query
+        else query
+    )
+
     embedding = get_embedding(
-        query
+        embedding_query
     )
 
     scope_retrieval_query = (
@@ -4424,6 +4985,12 @@ def retrieve_context(
         ),
         "current_page_selected": (
             current_page_selected_count
+        ),
+        "semantic_retrieval_query": (
+            semantic_retrieval_query
+        ),
+        "semantic_retrieval_used": bool(
+            semantic_retrieval_query
         ),
         "scope_retrieval_query": (
             scope_retrieval_query
@@ -5159,6 +5726,14 @@ ABSOLUTE RULES:
 - The CONTEXT has already been retrieved from the knowledge bases.
 - Never say that you need to browse, visit, access or open a website.
 - If CONTEXT provides only a partial answer, answer that part and state what is not specified.
+
+STABLECOIN PAYMENT ACCEPTANCE:
+- Treat customer payment acceptance, settlement, conversion, wallet balances and asset holding as different capabilities.
+- Do not infer that a merchant checkout, invoice or payment integration accepts customer payments in stablecoins merely because CONTEXT mentions stablecoin settlement, stablecoin conversion, Digital Dollars, Stable Balance, USD stablecoins in a wallet, or the ability to hold or receive stablecoins.
+- Do not use fiat settlement, bank payout or off-ramp functionality as evidence of stablecoin payment acceptance.
+- State that customers can pay a merchant with stablecoins only when CONTEXT explicitly says that the customer can pay the merchant, checkout, invoice or payment request with stablecoins.
+- If CONTEXT supports Bitcoin or Lightning payments and separately supports stablecoin wallet or settlement functionality, describe those facts separately and state that direct customer stablecoin payment acceptance is not specified when the question asks for it.
+
 - You may combine compatible information from multiple CONTEXT sources.
 - Give greatest weight to Source 1, then Source 2, then Source 3, then Source 4.
 - Prefer information from the primary/relevant knowledge base when sources differ in focus.
@@ -5832,6 +6407,14 @@ ABSOLUTE ANSWER RULES:
 - The CONTEXT has already been retrieved from the knowledge bases.
 - Never say that you need to browse, visit, access or open a website.
 - If CONTEXT provides only a partial answer, answer that part and state what is not specified.
+
+STABLECOIN PAYMENT ACCEPTANCE:
+- Treat customer payment acceptance, settlement, conversion, wallet balances and asset holding as different capabilities.
+- Do not infer that a merchant checkout, invoice or payment integration accepts customer payments in stablecoins merely because CONTEXT mentions stablecoin settlement, stablecoin conversion, Digital Dollars, Stable Balance, USD stablecoins in a wallet, or the ability to hold or receive stablecoins.
+- Do not use fiat settlement, bank payout or off-ramp functionality as evidence of stablecoin payment acceptance.
+- State that customers can pay a merchant with stablecoins only when CONTEXT explicitly says that the customer can pay the merchant, checkout, invoice or payment request with stablecoins.
+- If CONTEXT supports Bitcoin or Lightning payments and separately supports stablecoin wallet or settlement functionality, describe those facts separately and state that direct customer stablecoin payment acceptance is not specified when the question asks for it.
+
 - You may combine compatible information from multiple CONTEXT sources.
 - Give greatest weight to Source 1, then Source 2, then Source 3, then Source 4.
 - Prefer information from the primary/relevant knowledge base when sources differ in focus.
@@ -6383,6 +6966,15 @@ Do not guess.
 - If CONTEXT does not directly support the fact the user asked for, clearly say that the available context does not provide that information.
 - After stating that the requested information is not in CONTEXT, do not add speculation, possibilities, assumptions, or statements such as "may", "might", "probably", or "likely" about that unsupported fact.
 - A general ability to accept Bitcoin does not prove that a particular merchant, business, city, or location uses Coinsnap.
+
+STABLECOIN ACCEPTANCE AUDIT:
+- If the user asks whether customers can pay a merchant, checkout, invoice or payment integration with stablecoins, require direct CONTEXT evidence for that exact payment capability.
+- Stablecoin settlement is not evidence of customer stablecoin payment acceptance.
+- Stablecoin conversion is not evidence of customer stablecoin payment acceptance.
+- Digital Dollars, Stable Balance, USD stablecoins in a wallet, or the ability to hold or receive stablecoins are not evidence that a merchant checkout accepts stablecoin payments.
+- Fiat settlement, bank payout and off-ramp services are not evidence of stablecoin payment acceptance.
+- If a draft claims direct stablecoin payment acceptance without explicit CONTEXT support, mark it as a grounding error and correct the answer.
+- A corrected answer may separately state supported Bitcoin/Lightning payment capability and supported wallet or settlement stablecoin functionality, but must state that direct customer stablecoin payment acceptance is not specified when that fact is unsupported.
 
 If the draft has NO scope error, return:
 
